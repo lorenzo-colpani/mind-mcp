@@ -70,6 +70,10 @@ enum Cmd {
         #[arg(long = "depends-on")]
         depends_on: Vec<String>,
     },
+    /// Renames a plan; every dependency edge pointing at it follows.
+    /// Rename a plans/<name>/ folder yourself — the registry tracks names,
+    /// not folders.
+    Rename { name: String, new_name: String },
     /// Deletes a plan and its dependency links.
     Remove { name: String },
 }
@@ -327,6 +331,12 @@ fn real_main() -> anyhow::Result<()> {
             }
             sync_files(&project)?;
             println!("updated {name}");
+        }
+
+        Cmd::Rename { name, new_name } => {
+            db::rename(&conn, name, new_name)?;
+            sync_files(&project)?;
+            println!("renamed {name} -> {new_name}");
         }
 
         Cmd::Remove { name } => {

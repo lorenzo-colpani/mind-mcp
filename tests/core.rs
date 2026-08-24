@@ -141,6 +141,47 @@ fn delete_cascades_dep_edges() {
     assert!(db::deps_of(&conn, "a").unwrap().is_empty());
 }
 
+#[test]
+fn rename_follows_edges_both_ways() {
+    let conn = memory_db();
+    for name in ["upstream", "mid", "downstream"] {
+        db::insert(&conn, &plan(name, "pending")).unwrap();
+    }
+    // mid -> upstream (outgoing edge), downstream -> mid (incoming edge).
+    db::set_deps(&conn, "mid", &["upstream".into()]).unwrap();
+    db::set_deps(&conn, "downstream", &["mid".into()]).unwrap();
+
+    db::rename(&conn, "mid", "core").unwrap();
+
+    assert!(db::get(&conn, "mid").unwrap().is_none());
+    let got = db::get(&conn, "core").unwrap().unwrap();
+    assert_eq!(got.title, "title of mid");
+    assert_eq!(got.branch, "feat/mid");
+    assert_eq!(db::deps_of(&conn, "core").unwrap(), vec!["upstream"]);
+    assert_eq!(
+        db::dependents_of(&conn, "core").unwrap(),
+        vec!["downstream"]
+    );
+    // The graph is truly rewired: depending on core now closes a cycle
+    // through it (upstream <- core <- upstream).
+    assert!(db::set_deps(&conn, "upstream", &["core".into()]).is_err());
+}
+
+#[test]
+fn rename_rejects_unknown_self_bad_and_collision() {
+    let conn = memory_db();
+    db::insert(&conn, &plan("alpha", "pending")).unwrap();
+    db::insert(&conn, &plan("beta", "pending")).unwrap();
+
+    assert!(db::rename(&conn, "ghost", "any").is_err());
+    assert!(db::rename(&conn, "alpha", "alpha").is_err());
+    assert!(db::rename(&conn, "alpha", "Beta").is_err());
+    assert!(db::rename(&conn, "alpha", "-beta").is_err());
+    assert!(db::rename(&conn, "alpha", "beta").is_err());
+    // Every rejection left the plan untouched.
+    assert!(db::get(&conn, "alpha").unwrap().is_some());
+}
+
 const DOC: &str = "\
 # Bebaiha — Plan System
 

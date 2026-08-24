@@ -24,6 +24,7 @@ mind show <plan>        # full record
 mind ready              # unblocked plans
 mind add <name> "<title>" [--depends-on <plan>]
 mind update <name> --status done --merge-commit abc1234
+mind rename <old-name> <new-name>   # dependency edges follow
 mind remove <name>
 ```
 

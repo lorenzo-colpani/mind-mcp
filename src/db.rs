@@ -215,6 +215,44 @@ pub fn delete(conn: &Connection, name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Rename a plan and rewrite every edge that references it, both as a
+/// dependency and as a dependent. The graph shape never changes, so no
+/// cycle check runs.
+pub fn rename(conn: &Connection, old: &str, new: &str) -> anyhow::Result<()> {
+    if get(conn, old)?.is_none() {
+        bail!("unknown plan '{old}'");
+    }
+    if !crate::state::valid_name(new) {
+        bail!("invalid name '{new}': use lowercase letters, digits, hyphens");
+    }
+    if new == old {
+        bail!("new name equals the current name");
+    }
+    if exists(conn, new)? {
+        bail!("plan '{new}' already exists");
+    }
+
+    // plan_deps references plans(name) without ON UPDATE CASCADE. Defer FK
+    // checks to COMMIT so the edge rewrites and the row rename land as one
+    // atomic step.
+    conn.pragma_update(None, "defer_foreign_keys", "ON")?;
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE plan_deps SET depends_on = ?1 WHERE depends_on = ?2",
+        params![new, old],
+    )?;
+    tx.execute(
+        "UPDATE plan_deps SET plan = ?1 WHERE plan = ?2",
+        params![new, old],
+    )?;
+    tx.execute(
+        "UPDATE plans SET name = ?1, updated_at = datetime('now') WHERE name = ?2",
+        params![new, old],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 fn exists(conn: &Connection, name: &str) -> anyhow::Result<bool> {
     Ok(get(conn, name)?.is_some())
 }

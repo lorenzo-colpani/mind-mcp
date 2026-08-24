@@ -1,4 +1,4 @@
-//! MCP tool surface. Ten tools: two plans-read, three plans-write, one
+//! MCP tool surface. Eleven tools: two plans-read, four plans-write, one
 //! maintenance, four brain. Mutating tools write through to plans.md and
 //! plans.yaml.
 
@@ -252,6 +252,13 @@ pub struct NameArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct RenameArgs {
+    pub name: String,
+    /// New unique plan name.
+    pub new_name: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct BrainAddArgs {
     /// Topic tag, e.g. rust, git, sql, workflow.
     pub tag: String,
@@ -401,6 +408,24 @@ impl MindTools {
             return tool_err(e.to_string());
         }
         tool_ok(format!("updated '{}'", args.name) + &after_mutation(&self.project))
+    }
+
+    #[tool(
+        description = "Rename a plan. Dependency edges follow, both directions. Does not touch a plans/<name>/ folder — rename that yourself if one exists. Syncs plans.md and plans.yaml."
+    )]
+    async fn plans_rename(&self, Parameters(args): Parameters<RenameArgs>) -> CallToolResult {
+        let _guard = WRITE_LOCK.lock().await;
+        let conn = match conn_of(&self.project) {
+            Ok(c) => c,
+            Err(e) => return e,
+        };
+        if let Err(e) = db::rename(&conn, &args.name, &args.new_name) {
+            return tool_err(e.to_string());
+        }
+        tool_ok(
+            format!("renamed '{}' -> '{}'", args.name, args.new_name)
+                + &after_mutation(&self.project),
+        )
     }
 
     #[tool(
