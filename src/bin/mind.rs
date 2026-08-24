@@ -25,10 +25,17 @@ enum Cmd {
         #[arg(long)]
         status: Option<String>,
     },
-    /// Dependency graph.
+    /// Dependency graph. Without a plan: the active work, skipping edges
+    /// between finished plans. With a plan: its direct dependencies and
+    /// dependents, whatever their status.
     Tree {
+        /// Focus on one plan (one hop each direction).
+        plan: Option<String>,
         #[arg(long, default_value = "mermaid")]
         format: String,
+        /// Include finished work.
+        #[arg(long)]
+        all: bool,
     },
     /// One plan in full: progress, branch, merge commit, dependents.
     Show { name: String },
@@ -128,8 +135,8 @@ fn real_main() -> anyhow::Result<()> {
                 return Ok(());
             }
             println!(
-                "{:<4} {:<24} {:<12} {:<22} {}",
-                "#", "NAME", "STATUS", "DEPENDS ON", "TITLE"
+                "{:<4} {:<24} {:<12} {:<22} TITLE",
+                "#", "NAME", "STATUS", "DEPENDS ON"
             );
             for p in &plans {
                 let deps = db::deps_of(&conn, &p.name)?.join(",");
@@ -160,16 +167,57 @@ fn real_main() -> anyhow::Result<()> {
             );
         }
 
-        Cmd::Tree { format } => {
-            let edges = db::all_edges(&conn)?;
+        Cmd::Tree { plan, format, all } => {
+            let plans = db::list(&conn, None)?;
+            let glyph_of = |name: &str| -> String {
+                match plans.iter().find(|p| p.name == name) {
+                    Some(p) => glyphs(&p.status).to_string(),
+                    None => String::new(),
+                }
+            };
+
+            let mut edges: Vec<(String, String)> = db::all_edges(&conn)?
+                .into_iter()
+                .filter(|(plan_name, dep)| {
+                    if *all {
+                        return true;
+                    }
+                    match plan.as_deref() {
+                        // Focused mode keeps every edge touching the plan.
+                        Some(focus) => plan_name == focus || dep == focus,
+                        // Whole-graph mode drops finished-to-finished edges.
+                        None => {
+                            let done = |n: &str| glyph_of(n) == "\u{2713}";
+                            !(done(plan_name) && done(dep))
+                        }
+                    }
+                })
+                .collect();
+            if let Some(focus) = plan.as_deref() {
+                if db::get(&conn, focus)?.is_none() {
+                    anyhow::bail!("unknown plan '{focus}'");
+                }
+                edges.retain(|(plan_name, dep)| plan_name == focus || dep == focus);
+            }
+
             if format == "ascii" {
-                for (plan, dep) in &edges {
-                    println!("{plan} <- {dep}");
+                for (dependent, dep) in &edges {
+                    println!(
+                        "{} {} --> {} {}",
+                        glyph_of(dep),
+                        dep,
+                        glyph_of(dependent),
+                        dependent
+                    );
                 }
             } else {
                 println!("flowchart TD");
-                for (plan, dep) in &edges {
-                    println!("    {dep}[{dep}] --> {plan}[{plan}]");
+                for (dependent, dep) in &edges {
+                    println!(
+                        "    \"{dep}\"[\"{} {dep}\"] --> \"{dependent}\"[\"{} {dependent}\"]",
+                        glyph_of(dep),
+                        glyph_of(dependent)
+                    );
                 }
             }
         }

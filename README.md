@@ -16,8 +16,10 @@ cargo install --path . --bin mind
 `cd` into a project, then:
 
 ```sh
-mind board              # every plan, by run order
-mind tree               # dependency graph
+mind board              # active plans, by run order
+mind board --all        # include finished work
+mind tree               # graph of active work
+mind tree <plan>        # one plan: its deps and dependents
 mind show <plan>        # full record
 mind ready              # unblocked plans
 mind add <name> "<title>" [--depends-on <plan>]
