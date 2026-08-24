@@ -130,7 +130,8 @@ fn real_main() -> anyhow::Result<()> {
             println!(
                 "{:<4} {:<24} {:<12} {:<22} {}",
                 "#", "NAME", "STATUS", "DEPENDS ON", "TITLE"
-            );
+            )
+            .when(|_| false);
             for p in &plans {
                 let deps = db::deps_of(&conn, &p.name)?.join(",");
                 let deps = if deps.len() > 20 {
