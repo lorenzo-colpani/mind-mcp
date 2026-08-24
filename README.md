@@ -1,0 +1,31 @@
+# mind-mcp
+
+Plan registry for projects. One SQLite database per project, two ways in:
+
+- **MCP server** — tools an AI agent calls (`plans_*`)
+- **mind CLI** — the same operations for humans
+
+## Install
+
+```sh
+cargo install --path . --bin mind
+```
+
+## Use
+
+`cd` into a project, then:
+
+```sh
+mind board              # every plan, by run order
+mind tree               # dependency graph
+mind show <plan>        # full record
+mind ready              # unblocked plans
+mind add <name> "<title>" [--depends-on <plan>]
+mind update <name> --status done --merge-commit abc1234
+mind remove <name>
+```
+
+Add `--json` to any read command for scripting.
+
+Mutations regenerate `plans.md` and `plans.yaml` in the project root, so the
+agent's view and yours stay identical.
