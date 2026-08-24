@@ -88,7 +88,34 @@ fn sync_files(project: &Project) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() {
+    // Piping into head/less closes stdout early; swallow exactly that panic
+    // and keep the loud hook for every other failure.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let broken = info
+            .payload()
+            .downcast_ref::<String>()
+            .is_some_and(|message| message.contains("Broken pipe"))
+            || info
+                .payload()
+                .downcast_ref::<&str>()
+                .is_some_and(|message| message.contains("Broken pipe"));
+        if !broken {
+            default_hook(info);
+        }
+    }));
+    match std::panic::catch_unwind(real_main) {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            eprintln!("Error: {err:?}");
+            std::process::exit(1);
+        }
+        Err(_) => std::process::exit(1),
+    }
+}
+
+fn real_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let (project, conn) = open_project()?;
 
