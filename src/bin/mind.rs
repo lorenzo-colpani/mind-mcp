@@ -19,11 +19,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Every plan by run order: status, dependencies, title.
+    /// Plans by run order. Defaults to work in flight; finished plans need
+    /// --all or an explicit --status.
     Board {
         /// Only plans with this status.
         #[arg(long)]
         status: Option<String>,
+        /// Include finished work.
+        #[arg(long)]
+        all: bool,
     },
     /// Dependency graph. Without a plan: the active work, skipping edges
     /// between finished plans. With a plan: its direct dependencies and
@@ -127,8 +131,16 @@ fn real_main() -> anyhow::Result<()> {
     let (project, conn) = open_project()?;
 
     match &cli.cmd {
-        Cmd::Board { status } => {
+        Cmd::Board { status, all } => {
             let mut plans = db::list(&conn, status.as_deref())?;
+            if status.is_none() && !*all {
+                let total = plans.len();
+                plans.retain(|p| p.status != "done");
+                let hidden = total - plans.len();
+                if hidden > 0 {
+                    println!("{hidden} done plans hidden; use --all to show them\n");
+                }
+            }
             plans.sort_by_key(|p| p.sort_order);
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&plans)?);
