@@ -120,8 +120,8 @@ pub fn run(project: &Project, legacy_dir: &Path) -> anyhow::Result<String> {
                 skipped.push(name);
                 continue;
             }
-            let (t, n) = import_folder(&tx, &name, &dir)?;
-            if t == 0 && n == 0 {
+            let (t, n, f) = import_folder(&tx, &name, &dir)?;
+            if t == 0 && n == 0 && !f {
                 // Nothing recognized in this folder — keep it and say so.
                 empty.push(name);
                 continue;
@@ -177,8 +177,12 @@ pub fn run(project: &Project, legacy_dir: &Path) -> anyhow::Result<String> {
 }
 
 /// Pull README sections into plan fields and discussion entries into notes.
-/// Returns (todos imported, notes imported).
-fn import_folder(conn: &Connection, name: &str, dir: &Path) -> anyhow::Result<(usize, usize)> {
+/// Returns (todos imported, notes imported, any field imported).
+fn import_folder(
+    conn: &Connection,
+    name: &str,
+    dir: &Path,
+) -> anyhow::Result<(usize, usize, bool)> {
     let readme = std::fs::read_to_string(dir.join("README.md")).unwrap_or_default();
 
     let goal = cut_section(&readme, "Goal");
@@ -186,8 +190,11 @@ fn import_folder(conn: &Connection, name: &str, dir: &Path) -> anyhow::Result<(u
     let definition_of_done = cut_section(&readme, "Definition of done");
     let review_type = review_header(&readme);
 
-    if goal.is_some() || context.is_some() || definition_of_done.is_some() || review_type.is_some()
-    {
+    let fields = goal.is_some()
+        || context.is_some()
+        || definition_of_done.is_some()
+        || review_type.is_some();
+    if fields {
         db::update(
             conn,
             name,
@@ -219,7 +226,7 @@ fn import_folder(conn: &Connection, name: &str, dir: &Path) -> anyhow::Result<(u
         db::note_add(conn, name, &block)?;
         notes += 1;
     }
-    Ok((todos, notes))
+    Ok((todos, notes, fields))
 }
 
 /// `**Review:** deep (two reviewers)` -> "deep", when it names a valid type.
