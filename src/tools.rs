@@ -1,6 +1,5 @@
-//! MCP tool surface. Eleven tools: two plans-read, four plans-write, one
-//! maintenance, four brain. Mutating tools write through to plans.md and
-//! plans.yaml.
+//! MCP tool surface. Ten plans tools + four brain tools. The registry is the
+//! committed `plans.db`; nothing is generated or synced.
 
 use std::fmt::Write as _;
 
@@ -12,7 +11,6 @@ use rmcp::{
 use serde::Deserialize;
 
 use crate::db::{self, Patch, Plan};
-use crate::markdown;
 use crate::state::{Project, valid_name};
 
 fn tool_err(msg: impl Into<String>) -> CallToolResult {
@@ -29,8 +27,7 @@ fn tool_ok(msg: impl Into<String>) -> CallToolResult {
 static WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn conn_of(project: &Project) -> Result<rusqlite::Connection, CallToolResult> {
-    db::open(&project.db_path().map_err(|e| tool_err(e.to_string()))?)
-        .map_err(|e| tool_err(e.to_string()))
+    db::open(&project.db_path()).map_err(|e| tool_err(e.to_string()))
 }
 
 // ---------- rendering helpers ----------
@@ -127,7 +124,15 @@ fn render_mermaid(edges: &[(String, String)]) -> String {
     out
 }
 
-fn render_detail(p: &Plan, deps: &[String], dependents: &[String]) -> String {
+/// One plan in full: record fields, then Goal / Context / Definition of done
+/// / Steps / Notes sections. Empty sections are omitted.
+pub fn render_detail(
+    p: &Plan,
+    deps: &[String],
+    dependents: &[String],
+    todos: &[db::Todo],
+    notes: &[db::Note],
+) -> String {
     let fmt_list = |items: &[String]| {
         if items.is_empty() {
             "—".to_string()
@@ -135,29 +140,55 @@ fn render_detail(p: &Plan, deps: &[String], dependents: &[String]) -> String {
             items.join(", ")
         }
     };
-    format!(
-        "# {}\n\n- status: {}\n- branch: {}\n- order: {}\n- progress: {}\n- merge_commit: {}\n- depends on: {}\n- blocks: {}\n",
-        p.name,
-        p.status,
-        if p.branch.is_empty() {
-            "—"
-        } else {
-            &p.branch
-        },
-        p.sort_order,
-        if p.progress.is_empty() {
-            "—"
-        } else {
-            &p.progress
-        },
-        if p.merge_commit.is_empty() {
-            "—"
-        } else {
-            &p.merge_commit
-        },
+    let mut out = format!("# {} — {}\n\n", p.name, p.title);
+    let _ = write!(out, "- status: {}\n- review: {}\n", p.status, p.review_type);
+    if !p.branch.is_empty() {
+        let _ = writeln!(out, "- branch: {}", p.branch);
+    }
+    let _ = writeln!(out, "- order: {}", p.sort_order);
+    if !p.merge_commit.is_empty() {
+        let _ = writeln!(out, "- merge_commit: {}", p.merge_commit);
+    }
+    let _ = write!(
+        out,
+        "- depends on: {}\n- blocks: {}\n",
         fmt_list(deps),
         fmt_list(dependents)
-    )
+    );
+
+    let mut sect = |title: &str, body: &str| {
+        if !body.trim().is_empty() {
+            let _ = write!(out, "\n## {title}\n\n{}\n", body.trim());
+        }
+    };
+    sect("Goal", &p.goal);
+    sect("Context", &p.context);
+    sect("Definition of done", &p.definition_of_done);
+
+    if !todos.is_empty() {
+        out.push_str("\n## Steps\n\n");
+        for t in todos {
+            match t.status.as_str() {
+                "done" => {
+                    let _ = writeln!(out, "- [x] {} (id {})", t.text, t.id);
+                }
+                "in_progress" => {
+                    let _ = writeln!(out, "- [ ] {} (id {}, in_progress)", t.text, t.id);
+                }
+                _ => {
+                    let _ = writeln!(out, "- [ ] {} (id {})", t.text, t.id);
+                }
+            }
+        }
+    }
+
+    if !notes.is_empty() {
+        out.push_str("\n## Notes\n\n");
+        for n in notes {
+            let _ = writeln!(out, "- {} (id {})", n.text.replace('\n', "\n  "), n.id);
+        }
+    }
+    out
 }
 
 // ---------- shared logic (used by both the CLI and MCP handlers) ----------
@@ -167,7 +198,7 @@ pub fn show_impl(
     name: Option<&str>,
     format: Option<String>,
 ) -> anyhow::Result<String> {
-    let conn = db::open(&project.db_path()?)?;
+    let conn = db::open(&project.db_path())?;
 
     if let Some(name) = name {
         let Some(p) = db::get(&conn, name)? else {
@@ -175,7 +206,9 @@ pub fn show_impl(
         };
         let deps = db::deps_of(&conn, name)?;
         let dependents = db::dependents_of(&conn, name)?;
-        return Ok(render_detail(&p, &deps, &dependents));
+        let todos = db::todos_of(&conn, name)?;
+        let notes = db::notes_of(&conn, name)?;
+        return Ok(render_detail(&p, &deps, &dependents, &todos, &notes));
     }
 
     let plans = db::list(&conn, None)?;
@@ -188,23 +221,12 @@ pub fn show_impl(
 }
 
 pub fn ready_impl(project: &Project) -> anyhow::Result<String> {
-    let conn = db::open(&project.db_path()?)?;
+    let conn = db::open(&project.db_path())?;
     let ready = db::ready(&conn)?;
     if ready.is_empty() {
         return Ok("Nothing is unblocked right now.".to_string());
     }
     Ok(render_board(&ready, &db::all_edges(&conn)?))
-}
-
-/// Every mutating plans tool funnels here: mutate, then write through.
-fn after_mutation(project: &Project) -> String {
-    match (
-        markdown::sync_plans_md(project),
-        markdown::export_yaml(project),
-    ) {
-        (Ok(()), Ok(())) => "\n(synced: plans.md + plans.yaml)".to_string(),
-        (Err(e), _) | (_, Err(e)) => format!("\n(warning: sync failed: {e})"),
-    }
 }
 
 // ---------- MCP tool definitions ----------
@@ -227,10 +249,17 @@ pub struct AddArgs {
     pub name: String,
     pub title: String,
     pub branch: Option<String>,
+    /// The outcome, one paragraph.
+    pub goal: Option<String>,
+    /// Background: why now, constraints, links.
+    pub context: Option<String>,
+    /// What "done" must prove.
+    pub definition_of_done: Option<String>,
+    /// Review gate: 'deep', 'quick', or 'none'. Default: deep.
+    pub review_type: Option<String>,
+    pub depends_on: Option<Vec<String>>,
     /// Position in run order. Default: after the last plan.
     pub order: Option<i64>,
-    /// Also create plans/<name>/README.md and discussion.md from templates.
-    pub scaffold: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -239,13 +268,15 @@ pub struct UpdateArgs {
     pub title: Option<String>,
     pub branch: Option<String>,
     pub status: Option<String>,
-    pub progress: Option<String>,
     pub merge_commit: Option<String>,
+    pub goal: Option<String>,
+    pub context: Option<String>,
+    pub definition_of_done: Option<String>,
+    pub review_type: Option<String>,
     pub order: Option<i64>,
     /// Replaces the whole dependency list. Omit to leave unchanged.
     pub depends_on: Option<Vec<String>>,
 }
-
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct NameArgs {
     pub name: String,
@@ -256,6 +287,34 @@ pub struct RenameArgs {
     pub name: String,
     /// New unique plan name.
     pub new_name: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct TodoAddArgs {
+    pub plan: String,
+    pub text: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct TodoEditArgs {
+    pub id: i64,
+    pub text: Option<String>,
+    /// pending, in_progress, or done.
+    pub status: Option<String>,
+    /// Position within the plan's steps.
+    pub order: Option<i64>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct TodoIdArgs {
+    pub id: i64,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct NoteAddArgs {
+    pub plan: String,
+    /// Decision, finding, or open point. Appended to the plan's log.
+    pub text: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -284,29 +343,10 @@ pub struct BrainIdArgs {
     pub id: i64,
 }
 
-const README_TEMPLATE: &str = "\
-# {name}
-
-**Branch:** `{branch}`
-**Status:** see the mind-mcp board
-
-## Goal
-
-## Steps
-
-## Definition of done
-";
-
-const DISCUSSION_TEMPLATE: &str = "\
-# {name} — Discussion
-
-Log decisions and open points here. Append as you work.
-";
-
 #[tool_router(server_handler)]
 impl MindTools {
     #[tool(
-        description = "Show plan state. Without arguments: the whole board. With format=tree or mermaid: the dependency graph. With name: full record of one plan plus its dependencies and dependents."
+        description = "Show plan state. Without arguments: the whole board. With format=tree or mermaid: the dependency graph. With name: full record of one plan — goal, context, definition of done, todos, notes — plus its dependencies and dependents."
     )]
     async fn plans_show(&self, Parameters(args): Parameters<ShowArgs>) -> CallToolResult {
         match show_impl(&self.project, args.name.as_deref(), args.format) {
@@ -327,7 +367,7 @@ impl MindTools {
     }
 
     #[tool(
-        description = "Add a plan. Optionally scaffolds plans/<name>/README.md and discussion.md. Syncs plans.md and plans.yaml."
+        description = "Add a plan with its definition: title, goal, context, definition of done, review type (deep|quick|none). Steps usually follow via plans_todo_add."
     )]
     async fn plans_add(&self, Parameters(args): Parameters<AddArgs>) -> CallToolResult {
         let _guard = WRITE_LOCK.lock().await;
@@ -341,49 +381,42 @@ impl MindTools {
                 args.name
             ));
         }
-        let plan = Plan {
-            name: args.name.clone(),
-            title: args.title.clone(),
-            branch: args.branch.unwrap_or_default(),
-            status: "pending".into(),
-            progress: String::new(),
-            sort_order: match args.order {
-                Some(o) => o,
-                None => match db::next_order(&conn) {
-                    Ok(n) => n,
-                    Err(e) => return tool_err(e.to_string()),
-                },
-            },
-            merge_commit: String::new(),
-        };
-        if let Err(e) = db::insert(&conn, &plan) {
+        if let Some(deps) = &args.depends_on
+            && let Err(e) = check_deps(&conn, &args.name, deps)
+        {
             return tool_err(e.to_string());
         }
-        if args.scaffold.unwrap_or(false) {
-            let dir = self.project.plan_dir(&args.name);
-            let readme = README_TEMPLATE
-                .replace("{name}", &args.name)
-                .replace("{branch}", &plan.branch);
-            if let Err(e) = crate::state::write_file(&dir.join("README.md"), &readme) {
-                return tool_err(format!("scaffold failed: {e}"));
+        let order = db::with_immediate(&conn, |conn| {
+            let sort_order = match args.order {
+                Some(o) => o,
+                None => db::next_order(conn)?,
+            };
+            let plan = db::Plan {
+                name: args.name.clone(),
+                title: args.title.clone(),
+                branch: args.branch.clone().unwrap_or_default(),
+                status: "pending".into(),
+                sort_order,
+                merge_commit: String::new(),
+                goal: args.goal.clone().unwrap_or_default(),
+                context: args.context.clone().unwrap_or_default(),
+                definition_of_done: args.definition_of_done.clone().unwrap_or_default(),
+                review_type: args.review_type.clone().unwrap_or_else(|| "deep".into()),
+            };
+            db::insert(conn, &plan)?;
+            if let Some(deps) = &args.depends_on {
+                db::set_deps(conn, &args.name, deps)?;
             }
-            if let Err(e) = crate::state::write_file(
-                &dir.join("discussion.md"),
-                &DISCUSSION_TEMPLATE.replace("{name}", &args.name),
-            ) {
-                return tool_err(format!("scaffold failed: {e}"));
-            }
+            Ok(sort_order)
+        });
+        match order {
+            Ok(order) => tool_ok(format!("added '{}' (order {})", args.name, order)),
+            Err(e) => tool_err(e.to_string()),
         }
-        tool_ok(format!(
-            "added '{}' (order {}){}",
-            args.name,
-            plan.sort_order,
-            after_mutation(&self.project)
-        ))
     }
 
     #[tool(
-        description = "Update a plan. Only provided fields change. depends_on replaces the whole dependency list (omit to keep). Rejects dependency cycles. Syncs plans.md and plans.yaml."
+        description = "Update a plan. Only provided fields change. depends_on replaces the whole dependency list (omit to keep). Rejects dependency cycles."
     )]
     async fn plans_update(&self, Parameters(args): Parameters<UpdateArgs>) -> CallToolResult {
         let _guard = WRITE_LOCK.lock().await;
@@ -395,24 +428,27 @@ impl MindTools {
             title: args.title.as_deref(),
             branch: args.branch.as_deref(),
             status: args.status.as_deref(),
-            progress: args.progress.as_deref(),
             order: args.order,
             merge_commit: args.merge_commit.as_deref(),
+            goal: args.goal.as_deref(),
+            context: args.context.as_deref(),
+            definition_of_done: args.definition_of_done.as_deref(),
+            review_type: args.review_type.as_deref(),
         };
-        if let Err(e) = db::update(&conn, &args.name, &patch) {
-            return tool_err(e.to_string());
+        let result = db::with_immediate(&conn, |conn| {
+            db::update(conn, &args.name, &patch)?;
+            if let Some(deps) = &args.depends_on {
+                db::set_deps(conn, &args.name, deps)?;
+            }
+            Ok(())
+        });
+        match result {
+            Ok(()) => tool_ok(format!("updated '{}'", args.name)),
+            Err(e) => tool_err(e.to_string()),
         }
-        if let Some(deps) = &args.depends_on
-            && let Err(e) = db::set_deps(&conn, &args.name, deps)
-        {
-            return tool_err(e.to_string());
-        }
-        tool_ok(format!("updated '{}'", args.name) + &after_mutation(&self.project))
     }
 
-    #[tool(
-        description = "Rename a plan. Dependency edges follow, both directions. Does not touch a plans/<name>/ folder — rename that yourself if one exists. Syncs plans.md and plans.yaml."
-    )]
+    #[tool(description = "Rename a plan. Dependency edges, todos, and notes follow.")]
     async fn plans_rename(&self, Parameters(args): Parameters<RenameArgs>) -> CallToolResult {
         let _guard = WRITE_LOCK.lock().await;
         let conn = match conn_of(&self.project) {
@@ -422,15 +458,10 @@ impl MindTools {
         if let Err(e) = db::rename(&conn, &args.name, &args.new_name) {
             return tool_err(e.to_string());
         }
-        tool_ok(
-            format!("renamed '{}' -> '{}'", args.name, args.new_name)
-                + &after_mutation(&self.project),
-        )
+        tool_ok(format!("renamed '{}' -> '{}'", args.name, args.new_name))
     }
 
-    #[tool(
-        description = "Delete a plan and its dependency links. Does not touch the plans/<name>/ folder. Syncs plans.md and plans.yaml."
-    )]
+    #[tool(description = "Delete a plan and its dependency links, todos, and notes.")]
     async fn plans_delete(&self, Parameters(args): Parameters<NameArgs>) -> CallToolResult {
         let _guard = WRITE_LOCK.lock().await;
         let conn = match conn_of(&self.project) {
@@ -440,14 +471,64 @@ impl MindTools {
         if let Err(e) = db::delete(&conn, &args.name) {
             return tool_err(e.to_string());
         }
-        tool_ok(format!("deleted '{}'", args.name) + &after_mutation(&self.project))
+        tool_ok(format!("deleted '{}'", args.name))
     }
 
-    #[tool(description = "Regenerate plans.yaml from the database.")]
-    async fn plans_export(&self) -> CallToolResult {
-        match markdown::export_yaml(&self.project) {
-            Ok(()) => tool_ok("plans.yaml written"),
+    #[tool(description = "Add a step (todo) to a plan. Returns the todo id.")]
+    async fn plans_todo_add(&self, Parameters(args): Parameters<TodoAddArgs>) -> CallToolResult {
+        let _guard = WRITE_LOCK.lock().await;
+        match conn_of(&self.project) {
+            Ok(conn) => match db::todo_add(&conn, &args.plan, &args.text) {
+                Ok(id) => tool_ok(format!("todo {id} added to '{}'", args.plan)),
+                Err(e) => tool_err(e.to_string()),
+            },
+            Err(e) => e,
+        }
+    }
+
+    #[tool(
+        description = "Edit a todo: text, status (pending, in_progress, done), or order. Only provided fields change."
+    )]
+    async fn plans_todo_edit(&self, Parameters(args): Parameters<TodoEditArgs>) -> CallToolResult {
+        let _guard = WRITE_LOCK.lock().await;
+        let conn = match conn_of(&self.project) {
+            Ok(c) => c,
+            Err(e) => return e,
+        };
+        let patch = db::TodoPatch {
+            text: args.text.as_deref(),
+            status: args.status.as_deref(),
+            order: args.order,
+        };
+        match db::todo_edit(&conn, args.id, &patch) {
+            Ok(()) => tool_ok(format!("todo {} updated", args.id)),
             Err(e) => tool_err(e.to_string()),
+        }
+    }
+
+    #[tool(description = "Remove a todo by id.")]
+    async fn plans_todo_remove(&self, Parameters(args): Parameters<TodoIdArgs>) -> CallToolResult {
+        let _guard = WRITE_LOCK.lock().await;
+        match conn_of(&self.project) {
+            Ok(conn) => match db::todo_remove(&conn, args.id) {
+                Ok(()) => tool_ok(format!("todo {} removed", args.id)),
+                Err(e) => tool_err(e.to_string()),
+            },
+            Err(e) => e,
+        }
+    }
+
+    #[tool(
+        description = "Append a note to a plan's log: decisions, findings, open points, what happened. Append-only."
+    )]
+    async fn plans_note_add(&self, Parameters(args): Parameters<NoteAddArgs>) -> CallToolResult {
+        let _guard = WRITE_LOCK.lock().await;
+        match conn_of(&self.project) {
+            Ok(conn) => match db::note_add(&conn, &args.plan, &args.text) {
+                Ok(id) => tool_ok(format!("note {id} added to '{}'", args.plan)),
+                Err(e) => tool_err(e.to_string()),
+            },
+            Err(e) => e,
         }
     }
 
@@ -455,7 +536,7 @@ impl MindTools {
         description = "Add a global lesson to the brain file (~/.config/opencode/brain.md). Cross-project lessons only; repo-specific findings belong in that repo's docs/FINDINGS.md."
     )]
     async fn brain_add(&self, Parameters(args): Parameters<BrainAddArgs>) -> CallToolResult {
-        match markdown::brain_add(&args.tag, &args.lesson) {
+        match crate::brain::brain_add(&args.tag, &args.lesson) {
             Ok(l) => tool_ok(format!("added lesson id {}: [{}] {}", l.id, l.tag, l.text)),
             Err(e) => tool_err(e.to_string()),
         }
@@ -463,7 +544,7 @@ impl MindTools {
 
     #[tool(description = "List brain lessons, optionally filtered by tag.")]
     async fn brain_list(&self, Parameters(args): Parameters<BrainListArgs>) -> CallToolResult {
-        match markdown::read_brain() {
+        match crate::brain::read_brain() {
             Ok(lessons) => {
                 let filtered: Vec<_> = lessons
                     .iter()
@@ -485,7 +566,7 @@ impl MindTools {
 
     #[tool(description = "Edit a brain lesson's text or tag by id.")]
     async fn brain_edit(&self, Parameters(args): Parameters<BrainEditArgs>) -> CallToolResult {
-        match markdown::brain_edit(args.id, args.tag.as_deref(), args.text.as_deref()) {
+        match crate::brain::brain_edit(args.id, args.tag.as_deref(), args.text.as_deref()) {
             Ok(l) => tool_ok(format!("updated id {}: [{}] {}", l.id, l.tag, l.text)),
             Err(e) => tool_err(e.to_string()),
         }
@@ -493,9 +574,24 @@ impl MindTools {
 
     #[tool(description = "Remove a brain lesson by id.")]
     async fn brain_remove(&self, Parameters(args): Parameters<BrainIdArgs>) -> CallToolResult {
-        match markdown::brain_remove(args.id) {
+        match crate::brain::brain_remove(args.id) {
             Ok(()) => tool_ok(format!("removed id {}", args.id)),
             Err(e) => tool_err(e.to_string()),
         }
     }
+}
+
+/// Validate dependencies before a plan insert: known targets, no self-dep.
+fn check_deps(conn: &rusqlite::Connection, plan: &str, deps: &[String]) -> Result<(), String> {
+    if deps.iter().any(|d| d == plan) {
+        return Err("plan cannot depend on itself".to_string());
+    }
+    for d in deps {
+        match db::get(conn, d) {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(format!("unknown dependency plan '{d}'")),
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(())
 }

@@ -1,10 +1,10 @@
 //! Human-facing CLI over the mind registry: browse plans, the dependency
-//! tree, and mutate entries exactly like the MCP tools do — same database,
-//! same file sync, no drift.
+//! tree, and mutate entries exactly like the MCP tools do — same committed
+//! plans.db, no drift.
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use mind_mcp::{db, markdown, state::Project};
+use mind_mcp::{adopt, db, state::Project, tools};
 
 #[derive(Parser)]
 #[command(name = "mind", about = "Plan registry CLI for humans")]
@@ -41,17 +41,25 @@ enum Cmd {
         #[arg(long)]
         all: bool,
     },
-    /// One plan in full: progress, branch, merge commit, dependents.
+    /// One plan in full: goal, context, definition of done, todos, notes.
     Show { name: String },
     /// Pending plans whose every dependency is done.
     Ready,
     Add {
         name: String,
         title: String,
-        #[arg(long, default_value = "pending")]
-        status: String,
         #[arg(long)]
         branch: Option<String>,
+        #[arg(long)]
+        goal: Option<String>,
+        #[arg(long)]
+        context: Option<String>,
+        #[arg(long = "definition-of-done")]
+        definition_of_done: Option<String>,
+        #[arg(long = "review", default_value = "deep")]
+        review_type: String,
+        #[arg(long, default_value = "pending")]
+        status: String,
         #[arg(long = "depends-on")]
         depends_on: Vec<String>,
         #[arg(long)]
@@ -62,20 +70,57 @@ enum Cmd {
         #[arg(long)]
         status: Option<String>,
         #[arg(long)]
-        progress: Option<String>,
-        #[arg(long)]
         branch: Option<String>,
         #[arg(long)]
         merge_commit: Option<String>,
+        #[arg(long)]
+        goal: Option<String>,
+        #[arg(long)]
+        context: Option<String>,
+        #[arg(long = "definition-of-done")]
+        definition_of_done: Option<String>,
+        #[arg(long = "review")]
+        review_type: Option<String>,
+        /// Clears the whole dependency list.
+        #[arg(long = "clear-deps")]
+        clear_deps: bool,
         #[arg(long = "depends-on")]
         depends_on: Vec<String>,
     },
-    /// Renames a plan; every dependency edge pointing at it follows.
-    /// Rename a plans/<name>/ folder yourself — the registry tracks names,
-    /// not folders.
+    /// Renames a plan; dependency edges, todos, and notes follow.
     Rename { name: String, new_name: String },
-    /// Deletes a plan and its dependency links.
+    /// Deletes a plan and its dependency links, todos, and notes.
     Remove { name: String },
+    /// Per-plan steps.
+    Todo {
+        #[command(subcommand)]
+        cmd: TodoCmd,
+    },
+    /// Appends a note to a plan's log.
+    Note { plan: String, text: String },
+    /// One-time migration into the committed plans.db: legacy hidden DB,
+    /// plans/ folders, plans.md, plans.yaml.
+    Adopt,
+}
+
+#[derive(Subcommand)]
+enum TodoCmd {
+    Add {
+        plan: String,
+        text: String,
+    },
+    Edit {
+        id: i64,
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        order: Option<i64>,
+    },
+    Remove {
+        id: i64,
+    },
 }
 
 fn glyphs(status: &str) -> &'static str {
@@ -89,18 +134,9 @@ fn glyphs(status: &str) -> &'static str {
 
 fn open_project() -> anyhow::Result<(Project, rusqlite::Connection)> {
     let project = Project::resolve()?;
-    let path = project.db_path()?;
-    let conn = db::open(&path)
-        .with_context(|| format!("no plan registry for {} ({path:?})", project.root.display()))?;
+    let path = project.db_path();
+    let conn = db::open(&path).with_context(|| format!("open registry at {}", path.display()))?;
     Ok((project, conn))
-}
-
-/// Mutations mirror the MCP server's post-write behaviour: regenerate the
-/// repo snapshots so human edits never drift from agent edits.
-fn sync_files(project: &Project) -> anyhow::Result<()> {
-    markdown::sync_plans_md(project)?;
-    markdown::export_yaml(project)?;
-    Ok(())
 }
 
 fn main() {
@@ -132,6 +168,14 @@ fn main() {
 
 fn real_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    // Adopt must run before anything opens (and thereby creates) plans.db.
+    if let Cmd::Adopt = &cli.cmd {
+        let project = Project::resolve()?;
+        println!("{}", adopt::run(&project, &adopt::default_legacy_dir())?);
+        return Ok(());
+    }
+
     let (project, conn) = open_project()?;
 
     match &cli.cmd {
@@ -239,24 +283,7 @@ fn real_main() -> anyhow::Result<()> {
         }
 
         Cmd::Show { name } => {
-            let plan = db::get(&conn, name)?.context("unknown plan")?;
-            if cli.json {
-                println!("{}", serde_json::to_string_pretty(&plan)?);
-                return Ok(());
-            }
-            println!("name:         {}", plan.name);
-            println!("title:        {}", plan.title);
-            println!("status:       {} {}", glyphs(&plan.status), plan.status);
-            println!("branch:       {}", plan.branch);
-            println!("merge commit: {}", plan.merge_commit);
-            println!("depends on:   {}", db::deps_of(&conn, name)?.join(", "));
-            println!(
-                "dependents:   {}",
-                db::dependents_of(&conn, name)?.join(", ")
-            );
-            if !plan.progress.is_empty() {
-                println!("progress:\n  {}", plan.progress.replace('\n', "\n  "));
-            }
+            println!("{}", tools::show_impl(&project, Some(name), None)?);
         }
 
         Cmd::Ready => {
@@ -276,8 +303,12 @@ fn real_main() -> anyhow::Result<()> {
         Cmd::Add {
             name,
             title,
-            status,
             branch,
+            goal,
+            context,
+            definition_of_done,
+            review_type,
+            status,
             depends_on,
             after,
         } => {
@@ -288,62 +319,116 @@ fn real_main() -> anyhow::Result<()> {
                     anyhow::bail!("unknown dependency plan '{dep}'");
                 }
             }
-            let order = match after {
-                Some(prev) => prev + 1,
-                None => db::next_order(&conn)?,
-            };
-            let plan = db::Plan {
-                name: name.clone(),
-                title: title.clone(),
-                branch: branch.clone().unwrap_or_default(),
-                status: status.clone(),
-                progress: String::new(),
-                sort_order: order,
-                merge_commit: String::new(),
-            };
-            db::insert(&conn, &plan)?;
-            if !depends_on.is_empty() {
-                db::set_deps(&conn, name, depends_on)?;
-            }
-            sync_files(&project)?;
+            db::with_immediate(&conn, |conn| {
+                let order = match after {
+                    Some(prev) => prev + 1,
+                    None => db::next_order(conn)?,
+                };
+                let plan = db::Plan {
+                    name: name.clone(),
+                    title: title.clone(),
+                    branch: branch.clone().unwrap_or_default(),
+                    status: status.clone(),
+                    sort_order: order,
+                    merge_commit: String::new(),
+                    goal: goal.clone().unwrap_or_default(),
+                    context: context.clone().unwrap_or_default(),
+                    definition_of_done: definition_of_done.clone().unwrap_or_default(),
+                    review_type: review_type.clone(),
+                };
+                db::insert(conn, &plan)?;
+                if !depends_on.is_empty() {
+                    db::set_deps(conn, name, depends_on)?;
+                }
+                Ok(())
+            })?;
             println!("added {name}");
         }
 
         Cmd::Update {
             name,
             status,
-            progress,
             branch,
             merge_commit,
+            goal,
+            context,
+            definition_of_done,
+            review_type,
+            clear_deps,
             depends_on,
         } => {
             let patch = db::Patch {
                 title: None,
                 branch: branch.as_deref(),
                 status: status.as_deref(),
-                progress: progress.as_deref(),
                 order: None,
                 merge_commit: merge_commit.as_deref(),
+                goal: goal.as_deref(),
+                context: context.as_deref(),
+                definition_of_done: definition_of_done.as_deref(),
+                review_type: review_type.as_deref(),
             };
-            db::update(&conn, name, &patch)?;
-            if !depends_on.is_empty() {
-                db::set_deps(&conn, name, depends_on)?;
-            }
-            sync_files(&project)?;
+            let deps: Option<Vec<String>> = if *clear_deps {
+                Some(Vec::new())
+            } else if depends_on.is_empty() {
+                None
+            } else {
+                Some(depends_on.clone())
+            };
+            db::with_immediate(&conn, |conn| {
+                db::update(conn, name, &patch)?;
+                if let Some(deps) = deps {
+                    db::set_deps(conn, name, &deps)?;
+                }
+                Ok(())
+            })?;
             println!("updated {name}");
         }
 
         Cmd::Rename { name, new_name } => {
             db::rename(&conn, name, new_name)?;
-            sync_files(&project)?;
             println!("renamed {name} -> {new_name}");
         }
 
         Cmd::Remove { name } => {
             db::delete(&conn, name)?;
-            sync_files(&project)?;
             println!("removed {name}");
         }
+
+        Cmd::Todo { cmd } => match cmd {
+            TodoCmd::Add { plan, text } => {
+                let id = db::todo_add(&conn, plan, text)?;
+                println!("todo {id} added to {plan}");
+            }
+            TodoCmd::Edit {
+                id,
+                text,
+                status,
+                order,
+            } => {
+                db::todo_edit(
+                    &conn,
+                    *id,
+                    &db::TodoPatch {
+                        text: text.as_deref(),
+                        status: status.as_deref(),
+                        order: *order,
+                    },
+                )?;
+                println!("todo {id} updated");
+            }
+            TodoCmd::Remove { id } => {
+                db::todo_remove(&conn, *id)?;
+                println!("todo {id} removed");
+            }
+        },
+
+        Cmd::Note { plan, text } => {
+            let id = db::note_add(&conn, plan, text)?;
+            println!("note {id} added to {plan}");
+        }
+
+        Cmd::Adopt => unreachable!("handled before opening the project"),
     }
 
     Ok(())

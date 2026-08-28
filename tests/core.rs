@@ -1,5 +1,4 @@
-use mind_mcp::db::{self, Patch, Plan};
-use mind_mcp::markdown;
+use mind_mcp::db::{self, Patch, Plan, TodoPatch};
 use mind_mcp::state;
 
 fn plan(name: &str, status: &str) -> Plan {
@@ -8,9 +7,12 @@ fn plan(name: &str, status: &str) -> Plan {
         title: format!("title of {name}"),
         branch: format!("feat/{name}"),
         status: status.into(),
-        progress: String::new(),
         sort_order: 0,
         merge_commit: String::new(),
+        goal: format!("goal of {name}"),
+        context: String::new(),
+        definition_of_done: String::new(),
+        review_type: "deep".into(),
     }
 }
 
@@ -29,26 +31,22 @@ fn valid_name_rules() {
 }
 
 #[test]
-fn slug_is_stable_hex() {
-    let dir = std::env::temp_dir().join("mind-slug-test");
-    std::fs::create_dir_all(&dir).unwrap();
-    let p = state::Project { root: dir.clone() };
-    let s1 = p.slug().unwrap();
-    let s2 = p.slug().unwrap();
-    assert_eq!(s1, s2);
-    assert!(
-        s1.chars()
-            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
-    );
-}
-
-#[test]
 fn insert_and_get_roundtrip() {
     let conn = memory_db();
     db::insert(&conn, &plan("alpha", "pending")).unwrap();
     let got = db::get(&conn, "alpha").unwrap().unwrap();
     assert_eq!(got.title, "title of alpha");
+    assert_eq!(got.goal, "goal of alpha");
+    assert_eq!(got.review_type, "deep");
     assert!(db::get(&conn, "nope").unwrap().is_none());
+}
+
+#[test]
+fn insert_rejects_bad_review_type() {
+    let conn = memory_db();
+    let mut p = plan("alpha", "pending");
+    p.review_type = "casual".into();
+    assert!(db::insert(&conn, &p).is_err());
 }
 
 #[test]
@@ -62,17 +60,22 @@ fn update_only_touches_provided_fields() {
             title: Some("new title"),
             branch: None,
             status: None,
-            progress: None,
             order: Some(7),
             merge_commit: None,
+            goal: None,
+            context: None,
+            definition_of_done: None,
+            review_type: Some("quick"),
         },
     )
     .unwrap();
     let got = db::get(&conn, "alpha").unwrap().unwrap();
     assert_eq!(got.title, "new title");
     assert_eq!(got.sort_order, 7);
+    assert_eq!(got.review_type, "quick");
     assert_eq!(got.status, "pending");
     assert_eq!(got.branch, "feat/alpha");
+    assert_eq!(got.goal, "goal of alpha");
 }
 
 #[test]
@@ -90,9 +93,6 @@ fn set_deps_rejects_unknown_and_cycles() {
 
     // b -> a closes the cycle.
     assert!(db::set_deps(&conn, "b", &["a".into()]).is_err());
-
-    // Longer cycle: c -> a would not cycle; but c -> b -> ... check chain via
-    // replacement on 'a' pointing back through dependents is rejected above.
 
     // Self-dependency.
     assert!(db::set_deps(&conn, "a", &["a".into()]).is_err());
@@ -132,13 +132,17 @@ fn ready_returns_only_unblocked_pending() {
 }
 
 #[test]
-fn delete_cascades_dep_edges() {
+fn delete_cascades_dep_edges_todos_notes() {
     let conn = memory_db();
     db::insert(&conn, &plan("a", "pending")).unwrap();
     db::insert(&conn, &plan("b", "pending")).unwrap();
     db::set_deps(&conn, "a", &["b".into()]).unwrap();
+    db::todo_add(&conn, "b", "step").unwrap();
+    db::note_add(&conn, "b", "note").unwrap();
     db::delete(&conn, "b").unwrap();
     assert!(db::deps_of(&conn, "a").unwrap().is_empty());
+    assert!(db::todos_of(&conn, "b").unwrap().is_empty());
+    assert!(db::notes_of(&conn, "b").unwrap().is_empty());
 }
 
 #[test]
@@ -156,7 +160,6 @@ fn rename_follows_edges_both_ways() {
     assert!(db::get(&conn, "mid").unwrap().is_none());
     let got = db::get(&conn, "core").unwrap().unwrap();
     assert_eq!(got.title, "title of mid");
-    assert_eq!(got.branch, "feat/mid");
     assert_eq!(db::deps_of(&conn, "core").unwrap(), vec!["upstream"]);
     assert_eq!(
         db::dependents_of(&conn, "core").unwrap(),
@@ -165,6 +168,23 @@ fn rename_follows_edges_both_ways() {
     // The graph is truly rewired: depending on core now closes a cycle
     // through it (upstream <- core <- upstream).
     assert!(db::set_deps(&conn, "upstream", &["core".into()]).is_err());
+}
+
+#[test]
+fn rename_follows_todos_and_notes() {
+    let conn = memory_db();
+    db::insert(&conn, &plan("alpha", "pending")).unwrap();
+    let t = db::todo_add(&conn, "alpha", "step").unwrap();
+    let n = db::note_add(&conn, "alpha", "a finding").unwrap();
+    db::rename(&conn, "alpha", "beta").unwrap();
+    let todos = db::todos_of(&conn, "beta").unwrap();
+    let notes = db::notes_of(&conn, "beta").unwrap();
+    assert_eq!(todos.len(), 1);
+    assert_eq!(todos[0].plan, "beta");
+    assert_eq!(todos[0].id, t);
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].plan, "beta");
+    assert_eq!(notes[0].id, n);
 }
 
 #[test]
@@ -182,78 +202,400 @@ fn rename_rejects_unknown_self_bad_and_collision() {
     assert!(db::get(&conn, "alpha").unwrap().is_some());
 }
 
-const DOC: &str = "\
-# Bebaiha — Plan System
+#[test]
+fn todo_lifecycle() {
+    let conn = memory_db();
+    db::insert(&conn, &plan("alpha", "pending")).unwrap();
+    let t1 = db::todo_add(&conn, "alpha", "first step").unwrap();
+    let t2 = db::todo_add(&conn, "alpha", "second step").unwrap();
+    assert_eq!(t1 + 1, t2);
 
-Intro text stays.
+    let todos = db::todos_of(&conn, "alpha").unwrap();
+    assert_eq!(todos.len(), 2);
+    assert_eq!(todos[0].status, "pending");
+    assert_eq!(todos[0].sort_order, 1);
 
-## Lifecycle
+    db::todo_edit(
+        &conn,
+        t1,
+        &TodoPatch {
+            text: None,
+            status: Some("in_progress"),
+            order: None,
+        },
+    )
+    .unwrap();
+    let todos = db::todos_of(&conn, "alpha").unwrap();
+    assert_eq!(todos[0].status, "in_progress");
 
-Steps stay too.
+    db::todo_edit(
+        &conn,
+        t1,
+        &TodoPatch {
+            text: None,
+            status: None,
+            order: Some(2),
+        },
+    )
+    .unwrap();
+    db::todo_edit(
+        &conn,
+        t2,
+        &TodoPatch {
+            text: None,
+            status: None,
+            order: Some(1),
+        },
+    )
+    .unwrap();
+    let todos = db::todos_of(&conn, "alpha").unwrap();
+    assert_eq!(todos[0].id, t2);
+    assert_eq!(todos[1].id, t1);
 
-## Done
+    db::todo_edit(
+        &conn,
+        t1,
+        &TodoPatch {
+            text: Some("rewritten"),
+            status: None,
+            order: None,
+        },
+    )
+    .unwrap();
+    let todos = db::todos_of(&conn, "alpha").unwrap();
+    assert_eq!(todos[1].text, "rewritten");
 
-| Plan | Merge commit | Result |
-|---|---|---|
-| old | `abc` | old work |
+    assert!(
+        db::todo_edit(
+            &conn,
+            t1,
+            &TodoPatch {
+                text: None,
+                status: Some("bogus"),
+                order: None
+            }
+        )
+        .is_err()
+    );
+    assert!(
+        db::todo_edit(
+            &conn,
+            999,
+            &TodoPatch {
+                text: None,
+                status: None,
+                order: None
+            }
+        )
+        .is_err()
+    );
+    db::todo_remove(&conn, t2).unwrap();
+    assert!(db::todos_of(&conn, "alpha").unwrap().len() == 1);
+    assert!(db::todo_remove(&conn, t2).is_err());
+}
+
+#[test]
+fn todos_scoped_to_plan_and_cascade_on_delete() {
+    let conn = memory_db();
+    db::insert(&conn, &plan("a", "pending")).unwrap();
+    db::insert(&conn, &plan("b", "pending")).unwrap();
+    db::todo_add(&conn, "a", "a1").unwrap();
+    let b1 = db::todo_add(&conn, "b", "b1").unwrap();
+    assert_eq!(db::todos_of(&conn, "a").unwrap().len(), 1);
+    db::delete(&conn, "b").unwrap();
+    assert!(db::todo_remove(&conn, b1).is_err());
+}
+
+#[test]
+fn notes_append_and_cascade() {
+    let conn = memory_db();
+    db::insert(&conn, &plan("alpha", "pending")).unwrap();
+    let n1 = db::note_add(&conn, "alpha", "decided against a JS fix").unwrap();
+    let _n2 = db::note_add(&conn, "alpha", "review flagged X; resolved").unwrap();
+    let notes = db::notes_of(&conn, "alpha").unwrap();
+    assert_eq!(notes.len(), 2);
+    assert_eq!(notes[0].id, n1);
+    assert!(!notes[1].created_at.is_empty());
+    assert!(db::note_add(&conn, "ghost", "x").is_err());
+    db::delete(&conn, "alpha").unwrap();
+    // Row is gone; a fresh note on the deleted plan fails.
+    assert!(db::note_add(&conn, "alpha", "gone").is_err());
+}
+
+// ---------- adopt ----------
+
+const SAMPLE_README: &str = "\
+# legacy-plan
+
+**Branch:** `feat/legacy-plan`
+**Review:** deep (two independent reviewer subagents)
+
+## Goal
+
+Make the thing work.
+
+## Steps
+
+1. First step, wrapped
+   onto two lines.
+- second item
+
+## Definition of done
+
+- Tests pass.
+- Deep review passes.
+";
+
+const SAMPLE_DISCUSSION: &str = "\
+# legacy-plan — Discussion
+
+Log decisions and open points here. Append as you work.
+
+## Decisions locked in the design session (2026-08-28)
+
+- **Mechanism: pseudonymization, not deletion.** Person rows stay.
+
+## Open points
+
+None right now.
 ";
 
 #[test]
-fn sync_replaces_sections_and_keeps_rest() {
-    use mind_mcp::markdown::sync_doc;
-    let done = vec![plan("old-plan", "done")];
-    let active = vec![plan("new-plan", "pending")];
-    let out = sync_doc(DOC, &active, &done, &[]);
-    assert!(out.contains("## Plan index"));
-    assert!(out.contains("## Done"));
-    assert!(out.contains("new-plan"));
-    assert!(out.contains("old-plan"));
-    assert!(out.contains("Intro text stays."));
-    assert!(out.contains("## Lifecycle"));
-    // Old hand-written done row is replaced by the rendered one.
-    assert!(!out.contains("| old |"));
-    // Order: index before done.
-    let idx = out.find("## Plan index").unwrap();
-    let dne = out.find("## Done").unwrap();
-    assert!(idx < dne);
+fn adopt_imports_folders_and_cleans_up() {
+    let repo = std::env::temp_dir().join(format!("mind-adopt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&repo);
+    std::fs::create_dir_all(repo.join("plans/legacy-plan")).unwrap();
+    std::fs::create_dir_all(repo.join("plans/ghost-plan")).unwrap();
+    std::fs::write(repo.join("plans/legacy-plan/README.md"), SAMPLE_README).unwrap();
+    std::fs::write(
+        repo.join("plans/legacy-plan/discussion.md"),
+        SAMPLE_DISCUSSION,
+    )
+    .unwrap();
+    std::fs::write(repo.join("plans.md"), "# x\n").unwrap();
+    std::fs::write(repo.join("plans.yaml"), "plans: []\n").unwrap();
+
+    // A legacy hidden DB with the old schema (progress column, no plan
+    // fields) plus one plan row and a dependency edge.
+    let legacy_dir = repo.join("legacy-data");
+    std::fs::create_dir_all(&legacy_dir).unwrap();
+    let canon = repo.canonicalize().unwrap();
+    let slug: String = canon
+        .to_string_lossy()
+        .bytes()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let legacy_db = legacy_dir.join(format!("{slug}.db"));
+    let legacy = rusqlite::Connection::open(&legacy_db).unwrap();
+    legacy
+        .execute_batch(
+            "CREATE TABLE plans(
+               name TEXT PRIMARY KEY, title TEXT NOT NULL, branch TEXT NOT NULL DEFAULT '',
+               status TEXT NOT NULL, progress TEXT NOT NULL DEFAULT '',
+               sort_order INTEGER NOT NULL DEFAULT 0, merge_commit TEXT NOT NULL DEFAULT '',
+               created_at TEXT NOT NULL DEFAULT (datetime('now')),
+               updated_at TEXT NOT NULL DEFAULT (datetime('now')));
+             CREATE TABLE plan_deps(
+               plan TEXT NOT NULL REFERENCES plans(name) ON DELETE CASCADE,
+               depends_on TEXT NOT NULL REFERENCES plans(name) ON DELETE CASCADE,
+               PRIMARY KEY(plan, depends_on));
+             INSERT INTO plans(name, title, branch, status, progress, sort_order, merge_commit)
+               VALUES('legacy-plan', 'Legacy plan', 'feat/legacy-plan', 'in_progress', 'half', 1, '');
+             INSERT INTO plans(name, title, branch, status, sort_order, merge_commit)
+               VALUES('done-dep', 'Done dep', '', 'done', 0, 'abc1234');
+             INSERT INTO plan_deps VALUES('legacy-plan', 'done-dep');",
+        )
+        .unwrap();
+
+    let project = state::Project { root: repo.clone() };
+    let summary = mind_mcp::adopt::run(&project, &legacy_dir).unwrap();
+
+    assert!(summary.contains("1 folder(s)"), "{summary}");
+    assert!(summary.contains("2 todo(s)"), "{summary}");
+    assert!(summary.contains("2 note(s)"), "{summary}");
+    assert!(summary.contains("ghost-plan"), "{summary}");
+
+    let conn = db::open(&project.db_path()).unwrap();
+    let p = db::get(&conn, "legacy-plan").unwrap().unwrap();
+    assert_eq!(p.goal, "Make the thing work.");
+    assert_eq!(p.definition_of_done, "- Tests pass.\n- Deep review passes.");
+    assert_eq!(p.review_type, "deep");
+    assert_eq!(p.merge_commit, "");
+    assert_eq!(
+        db::get(&conn, "done-dep").unwrap().unwrap().merge_commit,
+        "abc1234"
+    );
+    assert_eq!(db::deps_of(&conn, "legacy-plan").unwrap(), vec!["done-dep"]);
+    assert!(db::list(&conn, Some("in_progress")).unwrap()[0].name == "legacy-plan");
+
+    let todos = db::todos_of(&conn, "legacy-plan").unwrap();
+    assert_eq!(todos.len(), 2);
+    assert_eq!(todos[0].text, "First step, wrapped onto two lines.");
+    assert!(todos.iter().all(|t| t.status == "pending"));
+
+    let notes = db::notes_of(&conn, "legacy-plan").unwrap();
+    assert_eq!(notes.len(), 2);
+    assert!(notes[0].text.starts_with("Decisions locked"));
+    assert!(notes[1].text.starts_with("Open points"));
+
+    // Folder imported and gone; unknown folder left in place; artifacts gone.
+    assert!(!repo.join("plans/legacy-plan").exists());
+    assert!(repo.join("plans/ghost-plan").exists());
+    assert!(!repo.join("plans.md").exists());
+    assert!(!repo.join("plans.yaml").exists());
+
+    // Refuses to run twice.
+    assert!(mind_mcp::adopt::run(&project, &legacy_dir).is_err());
+
+    let _ = std::fs::remove_dir_all(&repo);
 }
 
 #[test]
-fn sync_appends_missing_sections_in_order() {
-    use mind_mcp::markdown::sync_doc;
-    let out = sync_doc("# Just a header\n", &[plan("x", "pending")], &[], &[]);
-    assert!(out.contains("## Plan index"));
-    assert!(out.contains("## Done"));
-    let idx = out.find("## Plan index").unwrap();
-    let dne = out.find("## Done").unwrap();
-    assert!(idx < dne);
+fn adopt_report_type_parsing() {
+    // review_from_line accepts only the enum values.
+    assert_eq!(
+        mind_mcp::adopt::review_from_line("**Review:** deep (two reviewers)"),
+        Some("deep".to_string())
+    );
+    assert_eq!(
+        mind_mcp::adopt::review_from_line("**Review:** quick"),
+        Some("quick".to_string())
+    );
+    assert_eq!(
+        mind_mcp::adopt::review_from_line("**Review:** none"),
+        Some("none".to_string())
+    );
+    assert_eq!(
+        mind_mcp::adopt::review_from_line("**Review:** strict"),
+        None
+    );
+    assert_eq!(mind_mcp::adopt::review_from_line("no marker"), None);
+}
+
+// ---------- adopt parsers ----------
+
+#[test]
+fn step_items_wraps_and_scopes_bullets() {
+    use mind_mcp::adopt::step_items;
+    let body = "1. First step, wrapped\n   onto two lines.\n- second item\n   2. Not a new item, just indented.\n* third star item";
+    let items = step_items(body);
+    assert_eq!(
+        items,
+        vec![
+            "First step, wrapped onto two lines.",
+            "second item 2. Not a new item, just indented.",
+            "third star item",
+        ]
+    );
 }
 
 #[test]
-fn brain_parse_add_edit_remove() {
-    let dir = std::env::temp_dir().join(format!("mind-brain-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    // SAFETY-free env juggling via a scoped override is not possible for a
-    // global fn; instead write to the real path only in CI-free local runs.
-    // These tests therefore exercise parse + render logic directly.
-    let text = format!("{BRAIN_SAMPLE}\n- [rust] Borrow by default. <!--id:3-->\n");
-    let lessons = markdown::parse_brain(&text);
-    assert_eq!(lessons.len(), 2);
-    assert_eq!(lessons[1].tag, "rust");
-    assert_eq!(lessons[1].id, 3);
-
-    let _ = dir;
+fn note_blocks_keep_hash_lines_after_first_heading() {
+    use mind_mcp::adopt::note_blocks;
+    let doc = "# title — dropped\nLog decisions and open points here. Append as you work.\n\n## Decision\n\n- use `#include` guards\n";
+    let blocks = note_blocks(doc);
+    assert_eq!(blocks.len(), 1);
+    assert!(blocks[0].starts_with("Decision"));
+    assert!(blocks[0].contains("`#include`"));
 }
+
+#[test]
+fn cut_section_handles_absent_and_fences() {
+    use mind_mcp::adopt::cut_section;
+    assert_eq!(
+        cut_section("## Goal\n\nreal\n", "Goal").as_deref(),
+        Some("real")
+    );
+    assert_eq!(cut_section("no sections", "Goal"), None);
+    assert_eq!(
+        cut_section("## Goal\n\nempty next\n\n## Goal\n\nsecond\n", "Goal").as_deref(),
+        Some("empty next")
+    );
+    let fenced = "## Steps\n\n```\n## not a heading\n```\n";
+    assert_eq!(
+        cut_section(fenced, "Steps").as_deref(),
+        Some("```\n## not a heading\n```")
+    );
+}
+
+#[test]
+fn adopt_bails_without_legacy_db_but_folders() {
+    let repo = std::env::temp_dir().join(format!("mind-adopt-bail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&repo);
+    std::fs::create_dir_all(repo.join("plans/lonely")).unwrap();
+    std::fs::write(repo.join("plans/lonely/README.md"), "# x\n").unwrap();
+    let project = state::Project { root: repo.clone() };
+
+    let err = mind_mcp::adopt::run(&project, std::path::Path::new("/nonexistent"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("refusing a partial migration"), "{err}");
+
+    // And nothing was created or deleted.
+    assert!(!repo.join("plans.db").exists());
+    assert!(repo.join("plans/lonely/README.md").exists());
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn adopt_tolerates_empty_registry_from_prior_read() {
+    let repo = std::env::temp_dir().join(format!("mind-adopt-empty-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&repo);
+    std::fs::create_dir_all(&repo).unwrap();
+    let project = state::Project { root: repo.clone() };
+
+    // A read (mind board / plans_show) on a legacy repo auto-creates an
+    // empty plans.db. Adopt must still run.
+    let conn = db::open(&project.db_path()).unwrap();
+    drop(conn);
+
+    let summary = mind_mcp::adopt::run(&project, std::path::Path::new("/nonexistent")).unwrap();
+    assert!(summary.contains("0 folder(s)"), "{summary}");
+    assert!(db::open(&project.db_path()).is_ok());
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+// ---------- brain ----------
 
 const BRAIN_SAMPLE: &str = "- [git] Squash merge per plan. <!--id:1-->";
 
 #[test]
-fn yaml_render_matches_shape() {
-    let mut p = plan("alpha", "pending");
-    p.progress = "half way".into();
-    let out = markdown::render_yaml(&[p], &[("alpha".into(), "beta".into())]);
-    assert!(out.starts_with("# Plan registry. Generated by mind-mcp"));
-    assert!(out.contains("- name: alpha"));
-    assert!(out.contains("progress: \"half way\""));
-    assert!(out.contains("depends_on: [beta]"));
+fn brain_parse_add_edit_remove() {
+    let text = format!("{BRAIN_SAMPLE}\n- [rust] Borrow by default. <!--id:3-->\n");
+    let lessons = mind_mcp::brain::parse_brain(&text);
+    assert_eq!(lessons.len(), 2);
+    assert_eq!(lessons[1].tag, "rust");
+    assert_eq!(lessons[1].id, 3);
+    assert_eq!(mind_mcp::brain::parse_brain("no lessons here").len(), 0);
+}
+
+#[test]
+fn detail_renders_sections_and_omits_empty() {
+    let mut p = plan("alpha", "in_progress");
+    p.definition_of_done = "Tests pass.".into();
+    let out = mind_mcp::tools::render_detail(
+        &p,
+        &["dep".into()],
+        &[],
+        &[db::Todo {
+            id: 7,
+            plan: "alpha".into(),
+            text: "do it".into(),
+            status: "done".into(),
+            sort_order: 1,
+        }],
+        &[db::Note {
+            id: 9,
+            plan: "alpha".into(),
+            text: "a note".into(),
+            created_at: "2026-08-28 10:00:00".into(),
+        }],
+    );
+    assert!(out.contains("# alpha —"));
+    assert!(out.contains("## Goal"));
+    assert!(!out.contains("## Context")); // empty -> omitted
+    assert!(out.contains("## Definition of done"));
+    assert!(out.contains("- [x] do the thing") || out.contains("- [x] do"));
+    assert!(out.contains("(id 9)"));
+    assert!(out.contains("depends on: dep"));
 }

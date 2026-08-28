@@ -1,7 +1,8 @@
 //! Project resolution and file paths.
 //!
-//! Isolation is structural: every path derives from the project root. Tools
-//! never accept a repo argument, so one project can never read another
+//! The registry is one SQLite file at the project root (`plans.db`), committed
+//! to git. Isolation is structural: every path derives from the project root.
+//! Tools never accept a repo argument, so one project can never read another
 //! project's data.
 
 use std::path::PathBuf;
@@ -41,41 +42,22 @@ impl Project {
         })
     }
 
-    /// Stable filesystem-safe key for this project. Hex of the canonical path.
-    pub fn slug(&self) -> anyhow::Result<String> {
-        let canon = self
-            .root
-            .canonicalize()
-            .with_context(|| format!("canonicalize {}", self.root.display()))?;
-        Ok(canon
-            .to_string_lossy()
-            .bytes()
-            .map(|b| format!("{b:02x}"))
-            .collect())
+    pub fn db_path(&self) -> PathBuf {
+        self.root.join("plans.db")
     }
 
-    pub fn data_dir() -> anyhow::Result<PathBuf> {
-        if let Ok(dir) = std::env::var("MIND_DATA") {
-            return Ok(PathBuf::from(dir));
-        }
-        let home = std::env::var("HOME").context("HOME not set")?;
-        Ok(PathBuf::from(home).join(".local/share/mind-mcp"))
+    /// Legacy folder layout, read by `adopt` only.
+    pub fn plans_dir(&self) -> PathBuf {
+        self.root.join("plans")
     }
 
-    pub fn db_path(&self) -> anyhow::Result<PathBuf> {
-        Ok(Self::data_dir()?.join(format!("{}.db", self.slug()?)))
-    }
-
+    /// Legacy generated artifacts, deleted by `adopt`.
     pub fn plans_md(&self) -> PathBuf {
         self.root.join("plans.md")
     }
 
     pub fn plans_yaml(&self) -> PathBuf {
         self.root.join("plans.yaml")
-    }
-
-    pub fn plan_dir(&self, name: &str) -> PathBuf {
-        self.root.join("plans").join(name)
     }
 }
 

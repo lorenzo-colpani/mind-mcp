@@ -1,4 +1,4 @@
-use mind_mcp::{markdown, state, tools};
+use mind_mcp::{state, tools};
 
 use rmcp::{ServiceExt, transport::stdio};
 use tools::MindTools;
@@ -21,13 +21,8 @@ fn main() -> anyhow::Result<()> {
             println!("{}", tools::show_impl(&project, None, Some("tree".into()))?);
             return Ok(());
         }
-        Some("export") => {
-            markdown::export_yaml(&project)?;
-            println!("plans.yaml written");
-            return Ok(());
-        }
         Some(other) => {
-            anyhow::bail!("unknown command '{other}'. use: show | ready | graph | export")
+            anyhow::bail!("unknown command '{other}'. use: show | ready | graph")
         }
         None => {}
     }
