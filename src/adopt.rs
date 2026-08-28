@@ -190,6 +190,16 @@ fn import_folder(
     let definition_of_done = cut_section(&readme, "Definition of done");
     let review_type = review_header(&readme);
 
+    // Unknown sections (design sketches, open points, scope notes, ...)
+    // carry real content; fold them into context so nothing is dropped.
+    let extras = extra_sections(&readme);
+    let context = match (context, extras.is_empty()) {
+        (Some(c), true) => Some(c),
+        (Some(c), false) => Some(format!("{c}\n\n{extras}")),
+        (None, true) => None,
+        (None, false) => Some(extras),
+    };
+
     let fields = goal.is_some()
         || context.is_some()
         || definition_of_done.is_some()
@@ -227,6 +237,57 @@ fn import_folder(
         notes += 1;
     }
     Ok((todos, notes, fields))
+}
+
+/// Every `## ` section not mapped to a plan field, rendered as
+/// `## Title\n\nbody` blocks joined by blank lines. Fence-aware.
+pub fn extra_sections(doc: &str) -> String {
+    const KNOWN: [&str; 4] = ["Goal", "Context", "Definition of done", "Steps"];
+    let mut extras: Vec<String> = Vec::new();
+    let mut title: Option<String> = None;
+    let mut body = String::new();
+    let mut fence = false;
+
+    let mut flush = |title: &mut Option<String>, body: &mut String| {
+        if let Some(t) = title.take()
+            && !KNOWN.contains(&t.as_str())
+        {
+            let trimmed = body.trim().to_string();
+            if !trimmed.is_empty() {
+                extras.push(format!("## {t}\n\n{trimmed}"));
+            }
+        }
+        body.clear();
+    };
+
+    for line in doc.lines() {
+        if line.trim_start().starts_with("```") {
+            fence = !fence;
+            if title.is_some() {
+                body.push_str(line);
+                body.push('\n');
+            }
+            continue;
+        }
+        if fence {
+            if title.is_some() {
+                body.push_str(line);
+                body.push('\n');
+            }
+            continue;
+        }
+        if let Some(h) = line.strip_prefix("## ") {
+            flush(&mut title, &mut body);
+            title = Some(h.trim().to_string());
+            continue;
+        }
+        if title.is_some() {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    flush(&mut title, &mut body);
+    extras.join("\n\n")
 }
 
 /// `**Review:** deep (two reviewers)` -> "deep", when it names a valid type.

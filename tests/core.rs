@@ -519,6 +519,18 @@ fn cut_section_handles_absent_and_fences() {
 }
 
 #[test]
+fn extra_sections_catch_unknown_headings() {
+    use mind_mcp::adopt::extra_sections;
+    let doc = "preamble\n\n## Goal\n\ngoal text\n\n## Open design points\n\n- point one\n- point two\n\n## Steps\n\n1. step\n";
+    let out = extra_sections(doc);
+    assert!(out.contains("## Open design points"), "{out}");
+    assert!(out.contains("- point one"), "{out}");
+    assert!(!out.contains("goal text"), "{out}");
+    assert!(!out.contains("1. step"), "{out}");
+    assert_eq!(extra_sections("## Goal\n\nonly known\n"), "");
+}
+
+#[test]
 fn adopt_bails_without_legacy_db_but_folders() {
     let repo = std::env::temp_dir().join(format!("mind-adopt-bail-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&repo);
