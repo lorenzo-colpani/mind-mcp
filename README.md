@@ -28,6 +28,7 @@ mind show <plan>        # full record: goal, context, DoD, todos, notes
 mind ready              # unblocked plans
 mind add <name> "<title>" --goal "..." --definition-of-done "..."
 mind update <name> --status done --merge-commit abc1234
+mind todo list <plan>   # open todos (in_progress, pending); --all adds done
 mind todo add <plan> "step" / mind todo edit <id> --status done
 mind note <plan> "decision or finding"
 mind rename <old-name> <new-name>   # deps, todos, notes follow

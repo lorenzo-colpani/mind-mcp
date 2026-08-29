@@ -1,4 +1,4 @@
-//! MCP tool surface. Ten plans tools + four brain tools. The registry is the
+//! MCP tool surface. Eleven plans tools + four brain tools. The registry is the
 //! committed `plans.db`; nothing is generated or synced.
 
 use std::fmt::Write as _;
@@ -8,7 +8,7 @@ use rmcp::{
     model::{CallToolResult, ContentBlock},
     schemars, tool, tool_router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::db::{self, Patch, Plan};
 use crate::state::{Project, valid_name};
@@ -193,24 +193,48 @@ pub fn render_detail(
 
 // ---------- shared logic (used by both the CLI and MCP handlers) ----------
 
+/// A plan in structured form: record, dependency edges, todos, notes.
+/// `show_impl` renders it; the CLI serializes it for `--json`.
+#[derive(Serialize)]
+pub struct PlanDetail {
+    pub plan: Plan,
+    pub depends_on: Vec<String>,
+    pub dependents: Vec<String>,
+    pub todos: Vec<db::Todo>,
+    pub notes: Vec<db::Note>,
+}
+
+pub fn detail_impl(project: &Project, name: &str) -> anyhow::Result<PlanDetail> {
+    let conn = db::open(&project.db_path())?;
+    let Some(plan) = db::get(&conn, name)? else {
+        anyhow::bail!("unknown plan '{name}'");
+    };
+    Ok(PlanDetail {
+        depends_on: db::deps_of(&conn, name)?,
+        dependents: db::dependents_of(&conn, name)?,
+        todos: db::todos_of(&conn, name)?,
+        notes: db::notes_of(&conn, name)?,
+        plan,
+    })
+}
+
 pub fn show_impl(
     project: &Project,
     name: Option<&str>,
     format: Option<String>,
 ) -> anyhow::Result<String> {
-    let conn = db::open(&project.db_path())?;
-
     if let Some(name) = name {
-        let Some(p) = db::get(&conn, name)? else {
-            anyhow::bail!("unknown plan '{name}'");
-        };
-        let deps = db::deps_of(&conn, name)?;
-        let dependents = db::dependents_of(&conn, name)?;
-        let todos = db::todos_of(&conn, name)?;
-        let notes = db::notes_of(&conn, name)?;
-        return Ok(render_detail(&p, &deps, &dependents, &todos, &notes));
+        let detail = detail_impl(project, name)?;
+        return Ok(render_detail(
+            &detail.plan,
+            &detail.depends_on,
+            &detail.dependents,
+            &detail.todos,
+            &detail.notes,
+        ));
     }
 
+    let conn = db::open(&project.db_path())?;
     let plans = db::list(&conn, None)?;
     let edges = db::all_edges(&conn)?;
     match format.as_deref().unwrap_or("board") {
@@ -218,6 +242,77 @@ pub fn show_impl(
         "mermaid" => Ok(render_mermaid(&edges)),
         _ => Ok(render_board(&plans, &edges)),
     }
+}
+
+/// Statuses a todo listing shows, in display order. Default: open work.
+/// `all` adds done. An explicit status filter replaces the default set.
+/// Unknown statuses yield an empty list; callers validate first.
+pub fn visible_sections(status: Option<&str>, all: bool) -> Vec<&'static str> {
+    const ORDER: [&str; 3] = ["in_progress", "pending", "done"];
+    match status {
+        Some(s) => ORDER.iter().copied().filter(|t| *t == s).collect(),
+        None if all => ORDER.to_vec(),
+        None => ORDER[..2].to_vec(),
+    }
+}
+
+pub fn todo_list_impl(
+    project: &Project,
+    plan: &str,
+    status: Option<String>,
+    all: bool,
+) -> anyhow::Result<String> {
+    let conn = db::open(&project.db_path())?;
+    if db::get(&conn, plan)?.is_none() {
+        anyhow::bail!("unknown plan '{plan}'");
+    }
+    let todos = db::todos_of(&conn, plan)?;
+    Ok(render_todo_list(plan, &todos, status.as_deref(), all))
+}
+
+/// Todos grouped by status — in_progress, pending, done (done only when
+/// visible). An explicit filter always answers, even when empty.
+pub fn render_todo_list(plan: &str, todos: &[db::Todo], status: Option<&str>, all: bool) -> String {
+    let sections = visible_sections(status, all);
+    let count = |s: &str| todos.iter().filter(|t| t.status == s).count();
+    let label = |s: &str| match s {
+        "in_progress" => "In progress",
+        "pending" => "Pending",
+        _ => "Done",
+    };
+
+    let mut out = String::new();
+    for (i, s) in sections.iter().enumerate() {
+        let group: Vec<&db::Todo> = todos.iter().filter(|t| t.status == *s).collect();
+        if group.is_empty() {
+            if status.is_some() {
+                let _ = writeln!(out, "(no {s} todos)");
+            }
+            continue;
+        }
+        if i > 0 {
+            out.push('\n');
+        }
+        let _ = writeln!(out, "## {}\n", label(s));
+        for t in group {
+            let _ = writeln!(out, "- {} (id {})", t.text, t.id);
+        }
+    }
+
+    if out.is_empty() {
+        return match count("done") {
+            0 => format!("(no todos in '{plan}')"),
+            done => format!("(no open todos in '{plan}' — {done} done; use --all)"),
+        };
+    }
+    if !sections.contains(&"done") && count("done") > 0 {
+        let _ = writeln!(
+            out,
+            "\n{} done hidden; use --all to show them",
+            count("done")
+        );
+    }
+    out.trim_end().to_string()
 }
 
 pub fn ready_impl(project: &Project) -> anyhow::Result<String> {
@@ -293,6 +388,15 @@ pub struct RenameArgs {
 pub struct TodoAddArgs {
     pub plan: String,
     pub text: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct TodoListArgs {
+    pub plan: String,
+    /// Only todos with this status: pending, in_progress, or done. Omit for open work.
+    pub status: Option<String>,
+    /// Include done todos.
+    pub all: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -483,6 +587,28 @@ impl MindTools {
                 Err(e) => tool_err(e.to_string()),
             },
             Err(e) => e,
+        }
+    }
+
+    #[tool(
+        description = "List a plan's todos. Default: open work only (in_progress, then pending). all=true adds done. status filters to one status: pending, in_progress, or done."
+    )]
+    async fn plans_todo_list(&self, Parameters(args): Parameters<TodoListArgs>) -> CallToolResult {
+        if let Some(s) = args.status.as_deref()
+            && !db::TODO_STATUSES.contains(&s)
+        {
+            return tool_err(format!(
+                "unknown todo status '{s}': use pending, in_progress, or done"
+            ));
+        }
+        match todo_list_impl(
+            &self.project,
+            &args.plan,
+            args.status,
+            args.all.unwrap_or(false),
+        ) {
+            Ok(out) => tool_ok(out),
+            Err(e) => tool_err(e.to_string()),
         }
     }
 

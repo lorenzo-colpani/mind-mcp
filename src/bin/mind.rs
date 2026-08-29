@@ -105,6 +105,16 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum TodoCmd {
+    /// Todos by status: open work by default, done with --all.
+    List {
+        plan: String,
+        /// Only todos with this status: pending, in_progress, or done.
+        #[arg(long)]
+        status: Option<String>,
+        /// Include done todos.
+        #[arg(long)]
+        all: bool,
+    },
     Add {
         plan: String,
         text: String,
@@ -283,7 +293,21 @@ fn real_main() -> anyhow::Result<()> {
         }
 
         Cmd::Show { name } => {
-            println!("{}", tools::show_impl(&project, Some(name), None)?);
+            let detail = tools::detail_impl(&project, name)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&detail)?);
+            } else {
+                println!(
+                    "{}",
+                    tools::render_detail(
+                        &detail.plan,
+                        &detail.depends_on,
+                        &detail.dependents,
+                        &detail.todos,
+                        &detail.notes,
+                    )
+                );
+            }
         }
 
         Cmd::Ready => {
@@ -396,6 +420,27 @@ fn real_main() -> anyhow::Result<()> {
         }
 
         Cmd::Todo { cmd } => match cmd {
+            TodoCmd::List { plan, status, all } => {
+                if let Some(s) = status.as_deref()
+                    && !db::TODO_STATUSES.contains(&s)
+                {
+                    anyhow::bail!("unknown todo status '{s}': use pending, in_progress, or done");
+                }
+                if cli.json {
+                    if db::get(&conn, plan)?.is_none() {
+                        anyhow::bail!("unknown plan '{plan}'");
+                    }
+                    let mut todos = db::todos_of(&conn, plan)?;
+                    let visible = tools::visible_sections(status.as_deref(), *all);
+                    todos.retain(|t| visible.contains(&t.status.as_str()));
+                    println!("{}", serde_json::to_string_pretty(&todos)?);
+                } else {
+                    println!(
+                        "{}",
+                        tools::todo_list_impl(&project, plan, status.clone(), *all)?
+                    );
+                }
+            }
             TodoCmd::Add { plan, text } => {
                 let id = db::todo_add(&conn, plan, text)?;
                 println!("todo {id} added to {plan}");

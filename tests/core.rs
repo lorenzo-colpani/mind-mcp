@@ -1,5 +1,6 @@
 use mind_mcp::db::{self, Patch, Plan, TodoPatch};
 use mind_mcp::state;
+use mind_mcp::tools;
 
 fn plan(name: &str, status: &str) -> Plan {
     Plan {
@@ -200,6 +201,77 @@ fn rename_rejects_unknown_self_bad_and_collision() {
     assert!(db::rename(&conn, "alpha", "beta").is_err());
     // Every rejection left the plan untouched.
     assert!(db::get(&conn, "alpha").unwrap().is_some());
+}
+
+fn todo(id: i64, text: &str, status: &str) -> db::Todo {
+    db::Todo {
+        id,
+        plan: "alpha".into(),
+        text: text.into(),
+        status: status.into(),
+        sort_order: id,
+    }
+}
+
+#[test]
+fn todo_list_default_shows_open_work_and_hides_done() {
+    let todos = vec![
+        todo(1, "finished step", "done"),
+        todo(2, "running step", "in_progress"),
+        todo(3, "queued step", "pending"),
+    ];
+
+    let out = tools::render_todo_list("alpha", &todos, None, false);
+    assert!(out.contains("## In progress\n\n- running step (id 2)"));
+    assert!(out.contains("## Pending\n\n- queued step (id 3)"));
+    assert!(!out.contains("## Done"));
+    assert!(!out.contains("finished step"));
+    assert!(out.contains("1 done hidden; use --all to show them"));
+    let progress = out.find("In progress").unwrap();
+    let pending = out.find("Pending").unwrap();
+    assert!(progress < pending);
+}
+
+#[test]
+fn todo_list_all_and_explicit_status() {
+    let todos = vec![
+        todo(1, "finished step", "done"),
+        todo(2, "running step", "in_progress"),
+        todo(3, "queued step", "pending"),
+    ];
+
+    let all = tools::render_todo_list("alpha", &todos, None, true);
+    assert!(all.contains("## Done\n\n- finished step (id 1)"));
+    assert!(!all.contains("hidden"));
+    let done = all.find("Done").unwrap();
+    assert!(all.find("Pending").unwrap() < done);
+
+    let only_done = tools::render_todo_list("alpha", &todos, Some("done"), false);
+    assert_eq!(only_done, "## Done\n\n- finished step (id 1)");
+
+    let empty = tools::render_todo_list(
+        "alpha",
+        &[todo(9, "queued", "pending")],
+        Some("done"),
+        false,
+    );
+    assert_eq!(empty, "(no done todos)");
+
+    let quiet = tools::render_todo_list("alpha", &[todo(9, "finished", "done")], None, false);
+    assert_eq!(quiet, "(no open todos in 'alpha' — 1 done; use --all)");
+}
+
+#[test]
+fn todo_list_visibility_sections() {
+    assert_eq!(
+        tools::visible_sections(None, false),
+        vec!["in_progress", "pending"]
+    );
+    assert_eq!(
+        tools::visible_sections(None, true),
+        vec!["in_progress", "pending", "done"]
+    );
+    assert_eq!(tools::visible_sections(Some("done"), true), vec!["done"]);
 }
 
 #[test]
