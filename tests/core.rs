@@ -1,4 +1,5 @@
 use mind_mcp::db::{self, Patch, Plan, TodoPatch};
+use mind_mcp::snapshot;
 use mind_mcp::state;
 use mind_mcp::tools;
 
@@ -682,4 +683,109 @@ fn detail_renders_sections_and_omits_empty() {
     assert!(out.contains("- [x] do the thing") || out.contains("- [x] do"));
     assert!(out.contains("(id 9)"));
     assert!(out.contains("depends on: dep"));
+}
+
+// ---------- snapshots ----------
+
+fn populated_db() -> rusqlite::Connection {
+    let conn = memory_db();
+    db::insert(&conn, &plan("base", "pending")).unwrap();
+    db::insert(&conn, &plan("follower", "pending")).unwrap();
+    db::update(
+        &conn,
+        "base",
+        &Patch {
+            title: None,
+            branch: None,
+            status: Some("done"),
+            order: Some(1),
+            merge_commit: Some("abc1234"),
+            goal: None,
+            context: None,
+            definition_of_done: None,
+            review_type: None,
+        },
+    )
+    .unwrap();
+    db::update(
+        &conn,
+        "follower",
+        &Patch {
+            title: None,
+            branch: None,
+            status: Some("in_progress"),
+            order: Some(2),
+            merge_commit: None,
+            goal: None,
+            context: None,
+            definition_of_done: None,
+            review_type: None,
+        },
+    )
+    .unwrap();
+    db::set_deps(&conn, "follower", &["base".to_string()]).unwrap();
+    db::todo_add(&conn, "follower", "first step").unwrap();
+    let second = db::todo_add(&conn, "follower", "second step").unwrap();
+    db::todo_edit(
+        &conn,
+        second,
+        &TodoPatch {
+            text: None,
+            status: Some("done"),
+            order: None,
+        },
+    )
+    .unwrap();
+    db::note_add(&conn, "follower", "a decision").unwrap();
+    conn
+}
+
+#[test]
+fn export_is_deterministic() {
+    let conn = populated_db();
+    let first = snapshot::to_yaml(&snapshot::export(&conn).unwrap()).unwrap();
+    let second = snapshot::to_yaml(&snapshot::export(&conn).unwrap()).unwrap();
+    assert_eq!(first, second);
+}
+
+#[test]
+fn snapshot_roundtrip_is_lossless() {
+    let source = populated_db();
+    let yaml = snapshot::to_yaml(&snapshot::export(&source).unwrap()).unwrap();
+
+    let target = memory_db();
+    let snap: snapshot::Snapshot = serde_yaml::from_str(&yaml).unwrap();
+    snapshot::import(&target, &snap, false).unwrap();
+
+    let restored = snapshot::to_yaml(&snapshot::export(&target).unwrap()).unwrap();
+    assert_eq!(yaml, restored);
+
+    // Ids and timestamps survive, and new rows continue past them.
+    let follower = db::get(&target, "follower").unwrap().unwrap();
+    assert_eq!(follower.status, "in_progress");
+    assert_eq!(db::deps_of(&target, "follower").unwrap(), vec!["base"]);
+    assert_eq!(
+        db::get(&target, "base").unwrap().unwrap().merge_commit,
+        "abc1234"
+    );
+    let notes = db::notes_of(&target, "follower").unwrap();
+    assert_eq!(notes.len(), 1);
+    assert!(!notes[0].created_at.is_empty());
+    let next_todo = db::todo_add(&target, "follower", "post-import step").unwrap();
+    assert!(next_todo > 2, "sequence must continue past restored ids");
+}
+
+#[test]
+fn import_refuses_nonempty_registry_without_force() {
+    let source = memory_db();
+    db::insert(&source, &plan("alpha", "pending")).unwrap();
+    let yaml = snapshot::to_yaml(&snapshot::export(&source).unwrap()).unwrap();
+    let snap: snapshot::Snapshot = serde_yaml::from_str(&yaml).unwrap();
+
+    let target = memory_db();
+    db::insert(&target, &plan("occupied", "pending")).unwrap();
+    assert!(snapshot::import(&target, &snap, false).is_err());
+    snapshot::import(&target, &snap, true).unwrap();
+    assert!(db::get(&target, "occupied").unwrap().is_none());
+    assert_eq!(db::list(&target, None).unwrap().len(), 1);
 }

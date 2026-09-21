@@ -1,4 +1,4 @@
-//! One-time migration into the committed repo registry (`plans.db`).
+//! One-time migration into the repo registry (`plans.db`).
 //!
 //! Sources: the legacy hidden per-user database plus the legacy
 //! `plans/<name>/` folders (README.md, discussion.md) and the generated

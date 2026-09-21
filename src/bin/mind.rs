@@ -1,10 +1,10 @@
 //! Human-facing CLI over the mind registry: browse plans, the dependency
-//! tree, and mutate entries exactly like the MCP tools do — same committed
+//! tree, and mutate entries exactly like the MCP tools do — same shared
 //! plans.db, no drift.
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use mind_mcp::{adopt, db, state::Project, tools};
+use mind_mcp::{adopt, db, snapshot, state::Project, tools};
 
 #[derive(Parser)]
 #[command(name = "mind", about = "Plan registry CLI for humans")]
@@ -98,7 +98,20 @@ enum Cmd {
     },
     /// Appends a note to a plan's log.
     Note { plan: String, text: String },
-    /// One-time migration into the committed plans.db: legacy hidden DB,
+    /// Portable YAML snapshot of the whole registry. Deterministic: the
+    /// same state always produces the same bytes.
+    Export {
+        /// Target file, relative to the current directory.
+        #[arg(default_value = "plans-export.yaml")]
+        path: String,
+    },
+    /// Restore a snapshot. Refuses a non-empty registry without --force.
+    Import {
+        path: String,
+        #[arg(long)]
+        force: bool,
+    },
+    /// One-time migration into the repo registry: legacy hidden DB,
     /// plans/ folders, plans.md, plans.yaml.
     Adopt,
 }
@@ -471,6 +484,24 @@ fn real_main() -> anyhow::Result<()> {
         Cmd::Note { plan, text } => {
             let id = db::note_add(&conn, plan, text)?;
             println!("note {id} added to {plan}");
+        }
+
+        Cmd::Export { path } => {
+            let snap = snapshot::export(&conn)?;
+            let count = snap.plans.len();
+            let yaml = snapshot::to_yaml(&snap)?;
+            std::fs::write(path, yaml)
+                .with_context(|| format!("write {}", std::path::Path::new(path).display()))?;
+            println!("exported {count} plans to {path}");
+        }
+
+        Cmd::Import { path, force } => {
+            let raw = std::fs::read_to_string(path)
+                .with_context(|| format!("read {}", std::path::Path::new(path).display()))?;
+            let snap: snapshot::Snapshot =
+                serde_yaml::from_str(&raw).with_context(|| format!("parse {path}"))?;
+            let count = snapshot::import(&conn, &snap, *force)?;
+            println!("imported {count} plans from {path}");
         }
 
         Cmd::Adopt => unreachable!("handled before opening the project"),

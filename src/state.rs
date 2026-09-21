@@ -1,7 +1,8 @@
 //! Project resolution and file paths.
 //!
-//! The registry is one SQLite file at the project root (`plans.db`), committed
-//! to git. Isolation is structural: every path derives from the project root.
+//! The registry is one SQLite file at the project root (`plans.db`),
+//! machine-local: every agent on the machine writes the same live file.
+//! Isolation is structural: every path derives from the project root.
 //! Tools never accept a repo argument, so one project can never read another
 //! project's data.
 

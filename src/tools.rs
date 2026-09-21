@@ -1,5 +1,5 @@
 //! MCP tool surface. Eleven plans tools + four brain tools. The registry is the
-//! committed `plans.db`; nothing is generated or synced.
+//! shared `plans.db`; nothing is generated or synced.
 
 use std::fmt::Write as _;
 

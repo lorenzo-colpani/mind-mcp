@@ -1,14 +1,14 @@
 # mind-mcp
 
 Plan registry for projects. One SQLite database per project — `plans.db` at
-the project root, committed to git. Two ways in:
+the project root, machine-local: every agent on the machine writes the same
+live file. Two ways in:
 
 - **MCP server** — tools an AI agent calls (`plans_*`)
 - **mind CLI** — the same operations for humans
 
-The database is the only artifact. No generated markdown, no YAML snapshots.
-A fresh clone already holds the full registry: plans, dependencies, todos,
-notes, and done history.
+The database is the only live artifact. Portable YAML snapshots exist for
+git history and machine moves (`mind export` / `mind import`).
 
 ## Install
 
@@ -33,6 +33,8 @@ mind todo add <plan> "step" / mind todo edit <id> --status done
 mind note <plan> "decision or finding"
 mind rename <old-name> <new-name>   # deps, todos, notes follow
 mind remove <name>
+mind export [path]      # deterministic YAML snapshot (plans-export.yaml)
+mind import <path> --force   # restore; refuses a non-empty registry
 ```
 
 Add `--json` to read commands for scripting.
@@ -53,8 +55,27 @@ database (`~/.local/share/mind-mcp/`), imports `plans/<name>/` folders
 become notes), then deletes the folders, `plans.md`, and `plans.yaml`.
 Refuses to run when `plans.db` already exists.
 
-## Git
+## Snapshots
 
-Commit `plans.db` with plan changes, separately from feature work. The file
-is small; binary means no line diffs — read state with `mind board` /
-`mind show`.
+The registry is machine-local state, like a dev database. Snapshots carry it
+across machines and into git history:
+
+```sh
+mind export                # writes plans-export.yaml, byte-stable per state
+mind export other.yaml     # any path
+mind import plans-export.yaml --force   # replaces the local registry
+```
+
+The export is deterministic: the same registry state always produces the
+same bytes, so committed snapshots diff cleanly. Restore needs `--force`
+unless the local registry is empty.
+
+## Worktrees
+
+Every path derives from the project root, so a session inside a worktree
+binds to the worktree's own copy. Set `MIND_REPO` to the canonical checkout
+when agents work in trees, so all of them share one live registry:
+
+```sh
+MIND_REPO=/path/to/main-checkout mind export
+```

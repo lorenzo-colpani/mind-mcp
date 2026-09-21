@@ -1,6 +1,6 @@
 //! SQLite storage for the plan registry: plans, their dependency graph,
-//! per-plan todos, and per-plan notes. The database file lives in the repo
-//! and is committed to git.
+//! per-plan todos, and per-plan notes. The database file lives at the
+//! project root and is machine-local state.
 
 use std::path::Path;
 use std::time::Duration;
@@ -90,7 +90,7 @@ pub fn open(path: &Path) -> anyhow::Result<Connection> {
     }
     let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
-    // Two agents may mutate the same committed registry at once.
+    // Two agents may mutate the same shared registry at once.
     conn.busy_timeout(Duration::from_secs(5))?;
     conn.execute_batch(BASE_SCHEMA)?;
     upgrade(&conn)?;
@@ -431,7 +431,7 @@ pub fn set_deps(conn: &Connection, plan: &str, deps: &[String]) -> anyhow::Resul
 
 /// Run `f` inside one BEGIN IMMEDIATE transaction. Multi-statement
 /// mutations must use this: two agents (separate MCP servers, or CLI vs
-/// MCP) share the committed plans.db, and the process-local write lock
+/// MCP) share the plans.db file, and the process-local write lock
 /// cannot serialize them.
 pub fn with_immediate<T>(
     conn: &Connection,
