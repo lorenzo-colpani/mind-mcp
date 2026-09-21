@@ -489,17 +489,12 @@ fn real_main() -> anyhow::Result<()> {
         Cmd::Export { path } => {
             let snap = snapshot::export(&conn)?;
             let count = snap.plans.len();
-            let yaml = snapshot::to_yaml(&snap)?;
-            std::fs::write(path, yaml)
-                .with_context(|| format!("write {}", std::path::Path::new(path).display()))?;
+            snapshot::write(path, &snap)?;
             println!("exported {count} plans to {path}");
         }
 
         Cmd::Import { path, force } => {
-            let raw = std::fs::read_to_string(path)
-                .with_context(|| format!("read {}", std::path::Path::new(path).display()))?;
-            let snap: snapshot::Snapshot =
-                serde_yaml::from_str(&raw).with_context(|| format!("parse {path}"))?;
+            let snap = snapshot::read(path)?;
             let count = snapshot::import(&conn, &snap, *force)?;
             println!("imported {count} plans from {path}");
         }

@@ -177,9 +177,11 @@ pub fn get(conn: &Connection, name: &str) -> anyhow::Result<Option<Plan>> {
 
 /// Direct dependencies (what this plan waits for).
 pub fn deps_of(conn: &Connection, name: &str) -> anyhow::Result<Vec<String>> {
+    // `depends_on` breaks ties so equal sort_order still order stably:
+    // snapshot bytes must not depend on scan order.
     let mut stmt = conn.prepare(
         "SELECT depends_on FROM plan_deps WHERE plan = ?1
-         ORDER BY (SELECT sort_order FROM plans WHERE name = depends_on)",
+         ORDER BY (SELECT sort_order FROM plans WHERE name = depends_on), depends_on",
     )?;
     let rows = stmt.query_map(params![name], |r| r.get::<_, String>(0))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -251,6 +253,7 @@ pub fn insert(conn: &Connection, p: &Plan) -> anyhow::Result<()> {
 
 /// Update provided fields only. `depends_on` here means: replace the whole
 /// list. `None` leaves it untouched.
+#[derive(Default)]
 pub struct Patch<'a> {
     pub title: Option<&'a str>,
     pub branch: Option<&'a str>,
@@ -482,6 +485,7 @@ pub fn todo_add(conn: &Connection, plan: &str, text: &str) -> anyhow::Result<i64
     Ok(conn.last_insert_rowid())
 }
 
+#[derive(Default)]
 pub struct TodoPatch<'a> {
     pub text: Option<&'a str>,
     pub status: Option<&'a str>,

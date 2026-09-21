@@ -60,14 +60,9 @@ fn update_only_touches_provided_fields() {
         "alpha",
         &Patch {
             title: Some("new title"),
-            branch: None,
-            status: None,
             order: Some(7),
-            merge_commit: None,
-            goal: None,
-            context: None,
-            definition_of_done: None,
             review_type: Some("quick"),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -292,9 +287,8 @@ fn todo_lifecycle() {
         &conn,
         t1,
         &TodoPatch {
-            text: None,
             status: Some("in_progress"),
-            order: None,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -305,9 +299,8 @@ fn todo_lifecycle() {
         &conn,
         t1,
         &TodoPatch {
-            text: None,
-            status: None,
             order: Some(2),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -315,9 +308,8 @@ fn todo_lifecycle() {
         &conn,
         t2,
         &TodoPatch {
-            text: None,
-            status: None,
             order: Some(1),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -330,8 +322,7 @@ fn todo_lifecycle() {
         t1,
         &TodoPatch {
             text: Some("rewritten"),
-            status: None,
-            order: None,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -343,9 +334,8 @@ fn todo_lifecycle() {
             &conn,
             t1,
             &TodoPatch {
-                text: None,
                 status: Some("bogus"),
-                order: None
+                ..Default::default()
             }
         )
         .is_err()
@@ -355,9 +345,7 @@ fn todo_lifecycle() {
             &conn,
             999,
             &TodoPatch {
-                text: None,
-                status: None,
-                order: None
+                ..Default::default()
             }
         )
         .is_err()
@@ -695,15 +683,10 @@ fn populated_db() -> rusqlite::Connection {
         &conn,
         "base",
         &Patch {
-            title: None,
-            branch: None,
             status: Some("done"),
             order: Some(1),
             merge_commit: Some("abc1234"),
-            goal: None,
-            context: None,
-            definition_of_done: None,
-            review_type: None,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -711,15 +694,9 @@ fn populated_db() -> rusqlite::Connection {
         &conn,
         "follower",
         &Patch {
-            title: None,
-            branch: None,
             status: Some("in_progress"),
             order: Some(2),
-            merge_commit: None,
-            goal: None,
-            context: None,
-            definition_of_done: None,
-            review_type: None,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -730,9 +707,8 @@ fn populated_db() -> rusqlite::Connection {
         &conn,
         second,
         &TodoPatch {
-            text: None,
             status: Some("done"),
-            order: None,
+            ..Default::default()
         },
     )
     .unwrap();
