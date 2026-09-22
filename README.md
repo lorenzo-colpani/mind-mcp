@@ -1,8 +1,11 @@
 # mind-mcp
 
-Plan registry for projects. One SQLite database per project — `plans.db` at
-the project root, machine-local: every agent on the machine writes the same
-live file. Two ways in:
+Plan registry for projects. One SQLite database per project, stored
+outside every work tree at `~/.config/opencode/mind/<repo-slug>/plans.db`
+— machine-local, shared by every clone and worktree of the repo. The slug
+derives from the origin remote URL (`owner-repo`), falling back to the
+checkout-root basename for local-only repos. A legacy `plans.db` at the
+repo root moves into the state dir on first open. Two ways in:
 
 - **MCP server** — tools an AI agent calls (`plans_*`)
 - **mind CLI** — the same operations for humans
@@ -53,7 +56,7 @@ findings, and open points go to the plan's append-only notes.
 database (`~/.local/share/mind-mcp/`), imports `plans/<name>/` folders
 (README sections become plan fields, steps become todos, discussion entries
 become notes), then deletes the folders, `plans.md`, and `plans.yaml`.
-Refuses to run when `plans.db` already exists.
+Refuses to run when the registry already holds plans.
 
 ## Snapshots
 
@@ -70,12 +73,24 @@ The export is deterministic: the same registry state always produces the
 same bytes, so committed snapshots diff cleanly. Restore needs `--force`
 unless the local registry is empty.
 
-## Worktrees
+## Worktrees and clones
 
-Every path derives from the project root, so a session inside a worktree
-binds to the worktree's own copy. Set `MIND_REPO` to the canonical checkout
-when agents work in trees, so all of them share one live registry:
+The registry lives in the state dir, so a session inside a worktree
+already shares one registry with every other checkout of the repo —
+origin-derived slugs make trees, clones, and renames irrelevant.
+`MIND_REPO` still pins the repo root when the process cwd is outside any
+checkout; the root identifies the repo, and resolution maps it to the
+state dir:
 
 ```sh
 MIND_REPO=/path/to/main-checkout mind export
 ```
+
+`MIND_STATE_HOME` moves the whole state dir (tests, isolation). One
+registry per repo is enforced with words: a `repo-id` marker names the
+repo each state dir hosts, and mismatches — a stray repo-root
+`plans.db`, a marker naming a different repo, a slug that changed under
+an existing registry — refuse with an explanation instead of silently
+picking a file. `plans.lock` sits beside the database and serializes the
+non-SQLite critical sections (migration, adopt); the landing lock for
+git merges uses the same file.

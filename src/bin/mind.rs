@@ -2,7 +2,6 @@
 //! tree, and mutate entries exactly like the MCP tools do — same shared
 //! plans.db, no drift.
 
-use anyhow::Context;
 use clap::{Parser, Subcommand};
 use mind_mcp::{adopt, db, snapshot, state::Project, tools};
 
@@ -157,9 +156,13 @@ fn glyphs(status: &str) -> &'static str {
 
 fn open_project() -> anyhow::Result<(Project, rusqlite::Connection)> {
     let project = Project::resolve()?;
-    let conn = project
-        .open_registry()
-        .with_context(|| format!("open registry at {}", project.db_path().display()))?;
+    if project.prepare()? {
+        eprintln!(
+            "migrated legacy plans.db into {}",
+            project.db_path().display()
+        );
+    }
+    let conn = db::open(&project.db_path())?;
     Ok((project, conn))
 }
 

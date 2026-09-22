@@ -1,3 +1,6 @@
+mod common;
+
+use common::project_with_named_home;
 use mind_mcp::db::{self, Patch, Plan, TodoPatch};
 use mind_mcp::snapshot;
 use mind_mcp::state;
@@ -23,15 +26,10 @@ fn memory_db() -> rusqlite::Connection {
 }
 
 /// A project rooted at `root`, isolated from the real state home: the
-/// registry lands under a per-process temp dir instead of
-/// ~/.config/opencode/mind. Slugs differ per repo basename, so parallel
-/// tests in one process never share a registry dir.
+/// registry lands in a per-repo temp state home (named after the repo
+/// dir, which every test owns exclusively).
 fn test_project(root: &std::path::Path) -> state::Project {
-    state::Project {
-        root: root.to_path_buf(),
-        state_home: std::env::temp_dir().join(format!("mind-state-home-{}", std::process::id())),
-        slug: state::slug_for_root(root).unwrap(),
-    }
+    project_with_named_home(root)
 }
 
 #[test]

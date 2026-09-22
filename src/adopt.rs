@@ -24,7 +24,7 @@ pub fn default_legacy_dir() -> PathBuf {
 }
 
 /// Hex-encoded canonical project root — the old per-project DB file name.
-fn legacy_slug(root: &Path) -> anyhow::Result<String> {
+fn legacy_db_stem(root: &Path) -> anyhow::Result<String> {
     let canon = root
         .canonicalize()
         .with_context(|| format!("canonicalize {}", root.display()))?;
@@ -62,9 +62,12 @@ fn legacy_dirs(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
 }
 
 pub fn run(project: &Project, legacy_dir: &Path) -> anyhow::Result<String> {
-    // Same guarantees as every other registry access: state dir, lock
-    // file, legacy repo-root plans.db moved in or refused.
-    project.prepare()?;
+    // Same guarantees as every other registry access, plus the registry
+    // lock held across the whole replace so no concurrent open writes
+    // into a file adopt is about to swap out.
+    let _lock = project.lock_registry()?;
+    let migrated = project.migrate_locked()?;
+    project.claim_marker()?;
     let db_path = project.db_path();
     if db_path.exists() {
         // An empty registry can only come from an earlier read that opened
@@ -81,7 +84,7 @@ pub fn run(project: &Project, legacy_dir: &Path) -> anyhow::Result<String> {
             .with_context(|| format!("remove empty {}", db_path.display()))?;
     }
 
-    let legacy_db = legacy_dir.join(format!("{}.db", legacy_slug(&project.root)?));
+    let legacy_db = legacy_dir.join(format!("{}.db", legacy_db_stem(&project.root)?));
     let folders_dir = project.plans_dir();
     let has_folders = folders_dir.is_dir() && !legacy_dirs(&folders_dir)?.is_empty();
     let has_artifacts = project.plans_md().exists() || project.plans_yaml().exists();
@@ -164,6 +167,9 @@ pub fn run(project: &Project, legacy_dir: &Path) -> anyhow::Result<String> {
         "adopted {folders} folder(s): {todo_count} todo(s), {note_count} note(s); registry at {}",
         db_path.display()
     );
+    if migrated {
+        summary.push_str("; moved the repo-root plans.db in");
+    }
     if !removed.is_empty() {
         summary.push_str(&format!("; removed {}", removed.join(", ")));
     }
