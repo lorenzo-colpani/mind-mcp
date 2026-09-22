@@ -157,8 +157,9 @@ fn glyphs(status: &str) -> &'static str {
 
 fn open_project() -> anyhow::Result<(Project, rusqlite::Connection)> {
     let project = Project::resolve()?;
-    let path = project.db_path();
-    let conn = db::open(&path).with_context(|| format!("open registry at {}", path.display()))?;
+    let conn = project
+        .open_registry()
+        .with_context(|| format!("open registry at {}", project.db_path().display()))?;
     Ok((project, conn))
 }
 

@@ -27,7 +27,7 @@ fn tool_ok(msg: impl Into<String>) -> CallToolResult {
 static WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn conn_of(project: &Project) -> Result<rusqlite::Connection, CallToolResult> {
-    db::open(&project.db_path()).map_err(|e| tool_err(e.to_string()))
+    project.open_registry().map_err(|e| tool_err(e.to_string()))
 }
 
 // ---------- rendering helpers ----------
@@ -205,7 +205,7 @@ pub struct PlanDetail {
 }
 
 pub fn detail_impl(project: &Project, name: &str) -> anyhow::Result<PlanDetail> {
-    let conn = db::open(&project.db_path())?;
+    let conn = project.open_registry()?;
     let Some(plan) = db::get(&conn, name)? else {
         anyhow::bail!("unknown plan '{name}'");
     };
@@ -234,7 +234,7 @@ pub fn show_impl(
         ));
     }
 
-    let conn = db::open(&project.db_path())?;
+    let conn = project.open_registry()?;
     let plans = db::list(&conn, None)?;
     let edges = db::all_edges(&conn)?;
     match format.as_deref().unwrap_or("board") {
@@ -262,7 +262,7 @@ pub fn todo_list_impl(
     status: Option<String>,
     all: bool,
 ) -> anyhow::Result<String> {
-    let conn = db::open(&project.db_path())?;
+    let conn = project.open_registry()?;
     if db::get(&conn, plan)?.is_none() {
         anyhow::bail!("unknown plan '{plan}'");
     }
@@ -316,7 +316,7 @@ pub fn render_todo_list(plan: &str, todos: &[db::Todo], status: Option<&str>, al
 }
 
 pub fn ready_impl(project: &Project) -> anyhow::Result<String> {
-    let conn = db::open(&project.db_path())?;
+    let conn = project.open_registry()?;
     let ready = db::ready(&conn)?;
     if ready.is_empty() {
         return Ok("Nothing is unblocked right now.".to_string());

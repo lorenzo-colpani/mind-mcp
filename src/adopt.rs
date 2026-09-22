@@ -62,6 +62,9 @@ fn legacy_dirs(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
 }
 
 pub fn run(project: &Project, legacy_dir: &Path) -> anyhow::Result<String> {
+    // Same guarantees as every other registry access: state dir, lock
+    // file, legacy repo-root plans.db moved in or refused.
+    project.prepare()?;
     let db_path = project.db_path();
     if db_path.exists() {
         // An empty registry can only come from an earlier read that opened

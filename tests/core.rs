@@ -22,6 +22,18 @@ fn memory_db() -> rusqlite::Connection {
     db::open(std::path::Path::new(":memory:")).unwrap()
 }
 
+/// A project rooted at `root`, isolated from the real state home: the
+/// registry lands under a per-process temp dir instead of
+/// ~/.config/opencode/mind. Slugs differ per repo basename, so parallel
+/// tests in one process never share a registry dir.
+fn test_project(root: &std::path::Path) -> state::Project {
+    state::Project {
+        root: root.to_path_buf(),
+        state_home: std::env::temp_dir().join(format!("mind-state-home-{}", std::process::id())),
+        slug: state::slug_for_root(root).unwrap(),
+    }
+}
+
 #[test]
 fn valid_name_rules() {
     assert!(state::valid_name("location-resources"));
@@ -468,7 +480,7 @@ fn adopt_imports_folders_and_cleans_up() {
         )
         .unwrap();
 
-    let project = state::Project { root: repo.clone() };
+    let project = test_project(&repo);
     let summary = mind_mcp::adopt::run(&project, &legacy_dir).unwrap();
 
     assert!(summary.contains("1 folder(s)"), "{summary}");
@@ -597,7 +609,7 @@ fn adopt_bails_without_legacy_db_but_folders() {
     let _ = std::fs::remove_dir_all(&repo);
     std::fs::create_dir_all(repo.join("plans/lonely")).unwrap();
     std::fs::write(repo.join("plans/lonely/README.md"), "# x\n").unwrap();
-    let project = state::Project { root: repo.clone() };
+    let project = test_project(&repo);
 
     let err = mind_mcp::adopt::run(&project, std::path::Path::new("/nonexistent"))
         .unwrap_err()
@@ -615,7 +627,7 @@ fn adopt_tolerates_empty_registry_from_prior_read() {
     let repo = std::env::temp_dir().join(format!("mind-adopt-empty-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&repo);
     std::fs::create_dir_all(&repo).unwrap();
-    let project = state::Project { root: repo.clone() };
+    let project = test_project(&repo);
 
     // A read (mind board / plans_show) on a legacy repo auto-creates an
     // empty plans.db. Adopt must still run.

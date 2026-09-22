@@ -1,6 +1,7 @@
 //! SQLite storage for the plan registry: plans, their dependency graph,
-//! per-plan todos, and per-plan notes. The database file lives at the
-//! project root and is machine-local state.
+//! per-plan todos, and per-plan notes. The database file lives in the
+//! repo's state dir (`~/.config/opencode/mind/<repo-slug>/plans.db`) and
+//! is machine-local state; paths come from `state::Project`.
 
 use std::path::Path;
 use std::time::Duration;
