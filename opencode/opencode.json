@@ -1,0 +1,62 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "subagent_depth": 2,
+  "provider": {
+    "openrouter": {
+      "models": {
+        "z-ai/glm-5.3-flash": {
+          "options": {
+            "temperature": 1,
+            "top_p": 0.95,
+            "provider": {
+              "quantizations": [
+                "fp8"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "zai-coding-plan": {
+      "models": {
+        "glm-5.3-flash": {
+          "options": {
+            "temperature": 1,
+            "top_p": 0.95,
+          }
+        }
+      }
+    }
+  },
+  "instructions": [
+    "AGENTS.md",
+    "brain.md"
+  ],
+  "mcp": {
+    "mind": {
+      "type": "local",
+      "command": [
+        "/home/lorenzo/projects/mind-mcp/target/release/mind-mcp"
+      ],
+      "environment": {
+        "MIND_REPO": "/home/lorenzo/projects/bebaiha"
+      },
+      "enabled": true
+    }
+  },
+  "permission": {
+    "todowrite": "deny",
+    "external_directory": {
+      "*": "allow"
+    }
+  },
+  "agent": {
+    "build": {
+      "permission": {
+        "*": "allow",
+        "todowrite": "deny",
+        "external_directory": "allow"
+      }
+    }
+  },
+}
